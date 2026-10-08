@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const net = require('node:net')
-const { readPsd, writePsdBuffer } = require('ag-psd')
+const { writePsdBuffer } = require('ag-psd')
 
 const appRoot = path.resolve(__dirname, '..')
 const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-psd-gui-'))
@@ -60,6 +60,7 @@ async function setInput(selector, value) {
 }
 
 async function main() {
+  const { openPsd } = await import('@northstar/psd-bridge')
   const electron = require('electron')
   assert.match(execFileSync(electron, ['--version'], { cwd: appRoot, encoding: 'utf8' }).trim(), /^v\d+\./)
   const port = await freePort()
@@ -97,12 +98,14 @@ async function main() {
     await click("document.querySelector('button.primary')", 'save PSD')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('PSD를 저장했습니다')", 'PSD save completion')
     const savedBytes = fs.readFileSync(psdPath)
-    const saved = readPsd(savedBytes, { skipThumbnail: true })
-    assert.equal(saved.children[0].name, '스모크 그룹')
-    assert.equal(saved.children[0].children[0].name, '스모크 편집 레이어')
-    assert.equal(saved.children[0].children[0].left, 4)
-    assert.equal(saved.children[0].children[0].hidden, true)
-    assert.ok(Math.abs(saved.children[0].children[0].opacity - 0.45) <= 1 / 255)
+    const saved = openPsd(savedBytes)
+    const savedTree = saved.readTree()
+    assert.equal(savedTree[0].name, '스모크 그룹')
+    assert.equal(savedTree[0].children[0].name, '스모크 편집 레이어')
+    assert.equal(savedTree[0].children[0].left, 4)
+    assert.equal(savedTree[0].children[0].visible, false)
+    assert.ok(Math.abs(savedTree[0].children[0].opacity - 0.45) <= 1 / 255)
+    assert.deepEqual(saved.getLayerPixels('0.0').data, new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]))
 
     await setInput('input[aria-label="레이어 이름"]', '저장하지 않을 이름')
     await click("Array.from(document.querySelectorAll('button')).find((button) => button.innerText.includes('열기'))", 'reopen saved PSD')

@@ -18,6 +18,14 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install PSD bridge dependencies
+        working-directory: packages/psd-bridge
+        run: npm ci
+
+      - name: Build PSD bridge
+        working-directory: packages/psd-bridge
+        run: npm run build
+
       - name: Install Editor dependencies
         working-directory: apps/editor
         run: npm ci
@@ -41,14 +49,6 @@ jobs:
       - name: Run Editor GUI smoke
         working-directory: apps/editor
         run: npm run smoke:gui
-
-      - name: Install PSD bridge dependencies
-        working-directory: packages/psd-bridge
-        run: npm ci
-
-      - name: Build PSD bridge
-        working-directory: packages/psd-bridge
-        run: npm run build
 
       - name: Test PSD bridge
         working-directory: packages/psd-bridge

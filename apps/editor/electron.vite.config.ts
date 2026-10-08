@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 const appRoot = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
-  main: { plugins: [externalizeDepsPlugin()] },
+  main: {
+    plugins: [externalizeDepsPlugin({ exclude: ['@northstar/psd-bridge', 'ag-psd'] })]
+  },
   preload: { plugins: [externalizeDepsPlugin()] },
   renderer: {
     root: appRoot,

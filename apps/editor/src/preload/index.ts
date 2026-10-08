@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { EditorDocument } from '../shared/document'
-import type { LayerChanges, PsdLayerView, PsdBridgeWarning } from '../../../../packages/psd-bridge/src/index'
+import type { LayerChanges, PsdLayerView, PsdBridgeWarning } from '@northstar/psd-bridge'
 
 export interface PsdEditorDocument {
   sessionId: string

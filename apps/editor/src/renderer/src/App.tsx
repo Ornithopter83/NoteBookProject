@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState, type ChangeEvent } fro
 import { AlignLeft, ArrowDown, ArrowUp, ChevronDown, Circle, Eye, EyeOff, FileImage, FilePlus2, Grid2X2, ImagePlus, Layers, LockKeyhole, MousePointer2, Redo2, Save, Square, Type, Undo2, X } from 'lucide-react'
 import { cloneDocument, createDocument, type EditorDocument, type EditorNode, type NodeKind } from '../../shared/document'
 import type { PsdEditorDocument } from '../../preload'
-import type { LayerChanges, PsdLayerView } from '../../../../../packages/psd-bridge/src/index'
+import type { LayerChanges, PsdLayerView } from '@northstar/psd-bridge'
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text'
 const palettes = ['#f97352', '#f7b955', '#b5ca74', '#62b7a6', '#6797d3', '#a18ad3', '#ed8ca2', '#252629']

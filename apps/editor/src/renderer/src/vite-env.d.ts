@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import type { EditorDocument } from '../../shared/document'
 import type { PsdEditorDocument } from '../../preload'
-import type { LayerChanges } from '../../../../../packages/psd-bridge/src/index'
+import type { LayerChanges } from '@northstar/psd-bridge'
 
 declare global {
   interface Window {

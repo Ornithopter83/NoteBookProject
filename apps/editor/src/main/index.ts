@@ -3,7 +3,7 @@ import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
-import { openPsd, type LayerChanges, type PsdLayerView } from '../../../../packages/psd-bridge/src/index'
+import { openPsd, type LayerChanges, type PsdLayerView } from '@northstar/psd-bridge'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
