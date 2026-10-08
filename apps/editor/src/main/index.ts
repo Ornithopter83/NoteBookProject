@@ -5,31 +5,52 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const isDev = !app.isPackaged
+const rendererUrl = process.env.ELECTRON_RENDERER_URL
+const isDev = Boolean(rendererUrl)
+const rendererHtml = path.resolve(here, '../renderer/index.html')
+const preloadPath = path.resolve(here, '../preload/index.js')
 let activeDocumentPath: string | undefined
+
+function allowsRendererNavigation(target: string): boolean {
+  try {
+    const targetUrl = new URL(target)
+    if (isDev) return targetUrl.origin === new URL(rendererUrl!).origin
+    return targetUrl.href === pathToFileURL(rendererHtml).href
+  } catch {
+    return false
+  }
+}
+
+function isDescendantPath(parentPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(parentPath, candidatePath)
+  return relativePath !== '' && relativePath !== '..' &&
+    !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)
+}
 
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1440, height: 940, minWidth: 1000, minHeight: 680,
     backgroundColor: '#111214', title: 'Northstar — 편집기',
     webPreferences: {
-      preload: path.join(here, '../preload/index.js'),
+      preload: preloadPath,
       contextIsolation: true, nodeIntegration: false, sandbox: true
     }
   })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, target) => {
-    const rendererUrl = pathToFileURL(path.join(here, '../renderer/index.html')).href
-    const allowed = isDev ? target.startsWith('http://localhost:5173/') : target === rendererUrl
-    if (!allowed) event.preventDefault()
+    if (!allowsRendererNavigation(target)) event.preventDefault()
   })
-  if (isDev) void window.loadURL('http://localhost:5173')
-  else void window.loadFile(path.join(here, '../renderer/index.html'))
+  window.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error(`[renderer] load failed (${code}) ${description}: ${url}`)
+  })
+  const load = isDev ? window.loadURL(rendererUrl!) : window.loadFile(rendererHtml)
+  void load.catch((error: unknown) => console.error('[renderer] window load failed:', error))
 }
 
 ipcMain.handle('document:save', async (_event, payload: { document: unknown }) => {
-  const result = activeDocumentPath
-    ? { filePath: activeDocumentPath, canceled: false }
+  const smokePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env.NORTHSTAR_GUI_SMOKE_FILE : undefined
+  const result = activeDocumentPath || smokePath
+    ? { filePath: activeDocumentPath ?? smokePath!, canceled: false }
     : await dialog.showSaveDialog({ title: '문서 저장', defaultPath: 'Untitled.nbdoc', filters: [{ name: 'Northstar 문서', extensions: ['nbdoc'] }] })
   if (result.canceled || !result.filePath) return null
   const document = validateDocument(structuredClone(payload.document))
@@ -52,10 +73,13 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
 })
 
 ipcMain.handle('document:open', async () => {
-  const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: 'Northstar 문서', extensions: ['nbdoc'] }] }
-  const result = await dialog.showOpenDialog(options)
-  if (result.canceled || !result.filePaths[0]) return null
-  const filePath = result.filePaths[0]
+  let filePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env.NORTHSTAR_GUI_SMOKE_FILE : undefined
+  if (!filePath) {
+    const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: 'Northstar 문서', extensions: ['nbdoc'] }] }
+    const result = await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return null
+    filePath = result.filePaths[0]
+  }
   const document = validateDocument(JSON.parse(await readFile(filePath, 'utf8')))
   const assetRoot = path.resolve(path.dirname(filePath), `${path.basename(filePath, '.nbdoc')}.assets`)
   for (const node of document.nodes) {
@@ -66,8 +90,8 @@ ipcMain.handle('document:open', async () => {
     const documentRoot = await realpath(path.dirname(filePath))
     const actualAssetRoot = await realpath(assetRoot)
     const actualFile = await realpath(absolute)
-    if (!actualAssetRoot.startsWith(documentRoot + path.sep)) throw new Error('문서 외부 리소스는 열 수 없습니다.')
-    if (!actualFile.startsWith(actualAssetRoot + path.sep)) throw new Error('문서 외부 리소스는 열 수 없습니다.')
+    if (!isDescendantPath(documentRoot, actualAssetRoot)) throw new Error('문서 외부 리소스는 열 수 없습니다.')
+    if (!isDescendantPath(actualAssetRoot, actualFile)) throw new Error('문서 외부 리소스는 열 수 없습니다.')
     const bytes = await readFile(actualFile)
     const mime = path.extname(absolute).toLowerCase() === '.jpg' || path.extname(absolute).toLowerCase() === '.jpeg' ? 'image/jpeg' : `image/${path.extname(absolute).slice(1)}`
     node.src = `data:${mime};base64,${bytes.toString('base64')}`
@@ -87,7 +111,11 @@ ipcMain.handle('image:import', async () => {
 })
 
 void app.whenReady().then(() => {
+  console.info(`[startup] renderer mode=${isDev ? 'development' : 'production'} html=${rendererHtml} preload=${preloadPath}`)
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+}).catch((error: unknown) => {
+  console.error('[startup] application initialization failed:', error)
+  app.exit(1)
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
