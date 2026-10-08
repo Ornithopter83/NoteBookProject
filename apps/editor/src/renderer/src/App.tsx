@@ -1,0 +1,166 @@
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { AlignLeft, ArrowDown, ArrowUp, ChevronDown, Circle, Eye, EyeOff, FileImage, FilePlus2, Grid2X2, ImagePlus, Layers, LockKeyhole, MousePointer2, Redo2, Save, Square, Type, Undo2, X } from 'lucide-react'
+import { cloneDocument, createDocument, type EditorDocument, type EditorNode, type NodeKind } from '../../shared/document'
+
+type Tool = 'select' | 'rect' | 'ellipse' | 'text'
+const palettes = ['#f97352', '#f7b955', '#b5ca74', '#62b7a6', '#6797d3', '#a18ad3', '#ed8ca2', '#252629']
+const makeId = () => `layer-${Math.random().toString(36).slice(2, 9)}`
+
+export default function App() {
+  const [document, setDocument] = useState<EditorDocument>(() => createDocument())
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [tool, setTool] = useState<Tool>('select')
+  const [zoom, setZoom] = useState(82)
+  const [history, setHistory] = useState<EditorDocument[]>([])
+  const [future, setFuture] = useState<EditorDocument[]>([])
+  const [message, setMessage] = useState('모든 변경 사항이 저장되었습니다')
+  const svgRef = useRef<SVGSVGElement>(null)
+  const dragRef = useRef<{ id: string; x: number; y: number; startX: number; startY: number; before: EditorDocument } | null>(null)
+  const selected = document.nodes.find((node) => node.id === selectedId) ?? null
+
+  const commit = useCallback((next: EditorDocument) => {
+    setHistory((items) => [...items.slice(-49), cloneDocument(document)])
+    setFuture([])
+    setDocument(next)
+    setMessage('저장되지 않은 변경 사항')
+  }, [document])
+
+  const updateNode = (id: string, patch: Partial<EditorNode>) => commit({ ...document, nodes: document.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) })
+  const undo = useCallback(() => {
+    if (!history.length) return
+    setFuture((items) => [cloneDocument(document), ...items])
+    setDocument(history[history.length - 1])
+    setHistory((items) => items.slice(0, -1))
+    setMessage('실행 취소됨')
+  }, [document, history])
+  const redo = useCallback(() => {
+    if (!future.length) return
+    setHistory((items) => [...items, cloneDocument(document)])
+    setDocument(future[0])
+    setFuture((items) => items.slice(1))
+    setMessage('다시 실행됨')
+  }, [document, future])
+
+  const addNode = (kind: NodeKind, x = 190 + document.nodes.length * 24, y = 160 + document.nodes.length * 18, src?: string) => {
+    const index = document.nodes.filter((node) => node.kind === kind).length + 1
+    const node: EditorNode = { id: makeId(), kind, name: `${kind === 'rect' ? '사각형' : kind === 'ellipse' ? '타원' : kind === 'text' ? '텍스트' : '이미지'} ${index}`, x, y, width: kind === 'text' ? 330 : kind === 'image' ? 260 : 240, height: kind === 'text' ? 76 : kind === 'image' ? 190 : 180, fill: kind === 'text' ? '#252629' : palettes[(document.nodes.length + 1) % palettes.length], opacity: 100, rotation: 0, visible: true, locked: false, ...(kind === 'text' ? { text: '새로운 아이디어', fontSize: 40 } : {}), ...(src ? { src } : {}) }
+    commit({ ...document, nodes: [...document.nodes, node] })
+    setSelectedId(node.id)
+    setTool('select')
+  }
+
+  const save = async () => {
+    try {
+      const result = await window.northstar.saveDocument(document)
+      if (result) { setDocument({ ...document, name: result.document.name }); setMessage('모든 변경 사항이 저장되었습니다') }
+    } catch (error) { setMessage(error instanceof Error ? error.message : '저장에 실패했습니다') }
+  }
+  const open = async () => {
+    try {
+      const result = await window.northstar.openDocument()
+      if (result) { const next = result.document; setDocument(next); setSelectedId(null); setHistory([]); setFuture([]); setMessage('문서를 열었습니다') }
+    } catch (error) { setMessage(error instanceof Error ? error.message : '문서를 열지 못했습니다') }
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void save() }
+      if (event.key === 'Escape') setTool('select')
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
+        commit({ ...document, nodes: document.nodes.filter((node) => node.id !== selectedId) }); setSelectedId(null)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [commit, document, redo, save, selectedId, undo])
+
+  const canvasPoint = (event: React.PointerEvent<SVGElement>) => {
+    const box = svgRef.current!.getBoundingClientRect()
+    return { x: (event.clientX - box.left) * document.width / box.width, y: (event.clientY - box.top) * document.height / box.height }
+  }
+  const onCanvasDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    if ((event.target as SVGElement).dataset.node) return
+    const point = canvasPoint(event)
+    if (tool !== 'select') { addNode(tool, point.x, point.y); return }
+    setSelectedId(null)
+  }
+  const onNodeDown = (event: React.PointerEvent<SVGElement>, node: EditorNode) => {
+    event.stopPropagation()
+    setSelectedId(node.id)
+    if (tool !== 'select' || node.locked) return
+    const point = canvasPoint(event)
+    dragRef.current = { id: node.id, x: point.x, y: point.y, startX: node.x, startY: node.y, before: cloneDocument(document) }
+    ;(event.currentTarget as SVGElement).setPointerCapture(event.pointerId)
+  }
+  const onNodeMove = (event: React.PointerEvent<SVGElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const point = canvasPoint(event)
+    setDocument((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === drag.id ? { ...node, x: Math.round(drag.startX + point.x - drag.x), y: Math.round(drag.startY + point.y - drag.y) } : node) }))
+  }
+  const onNodeUp = () => {
+    if (!dragRef.current) return
+    setHistory((items) => [...items.slice(-49), dragRef.current!.before]); setFuture([]); dragRef.current = null; setMessage('저장되지 않은 변경 사항')
+  }
+
+  const importImage = async () => { const src = await window.northstar.importImage(); if (src) addNode('image', undefined, undefined, src) }
+  const editDimension = (key: 'x' | 'y' | 'width' | 'height' | 'rotation', event: ChangeEvent<HTMLInputElement>) => { if (selected) updateNode(selected.id, { [key]: Number(event.target.value) }) }
+  const reorder = (id: string, direction: -1 | 1) => {
+    const index = document.nodes.findIndex((node) => node.id === id); const nextIndex = Math.max(0, Math.min(document.nodes.length - 1, index + direction))
+    if (index === nextIndex) return
+    const nodes = [...document.nodes]; [nodes[index], nodes[nextIndex]] = [nodes[nextIndex], nodes[index]]; commit({ ...document, nodes })
+  }
+
+  return <div className="app-shell">
+    <header className="topbar">
+      <div className="brand"><div className="brand-mark">N</div><span>northstar</span><span className="brand-divider" /><span className="workspace-label">워크스페이스</span></div>
+      <div className="document-tab"><span className="doc-dot" />{document.name}<span className="tab-close"><X size={13} /></span></div>
+      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()}><Save size={15} /> 저장</button><button className="avatar">J</button></div>
+    </header>
+    <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status"><span className="saved-dot" />{message}<span className="status-divider" />RGB · 8비트</div></div>
+    <div className="workspace">
+      <aside className="tool-rail">
+        <div className="tool-group"><ToolButton active={tool === 'select'} label="선택" onClick={() => setTool('select')}><MousePointer2 /></ToolButton><ToolButton active={tool === 'rect'} label="사각형" onClick={() => setTool('rect')}><Square /></ToolButton><ToolButton active={tool === 'ellipse'} label="타원" onClick={() => setTool('ellipse')}><Circle /></ToolButton><ToolButton active={tool === 'text'} label="텍스트" onClick={() => setTool('text')}><Type /></ToolButton><ToolButton active={false} label="이미지 가져오기" onClick={() => void importImage()}><ImagePlus /></ToolButton></div>
+        <div className="rail-bottom"><div className="rail-divider" /><button className="rail-action" title="정렬"><AlignLeft size={17} /></button><button className="rail-action" title="그리드"><Grid2X2 size={17} /></button></div>
+      </aside>
+      <main className="stage-area">
+        <div className="canvas-toolbar"><div className="canvas-tools"><button className={tool === 'select' ? 'mini-tool active' : 'mini-tool'} title="선택 도구" onClick={() => setTool('select')}><MousePointer2 size={15} /></button><span className="mini-separator" /><button className="mini-tool" title="레이어 추가" onClick={() => addNode('rect')}><Square size={14} /></button><button className="mini-tool" title="텍스트 추가" onClick={() => addNode('text')}><Type size={15} /></button><button className="mini-tool" title="이미지 가져오기" onClick={() => void importImage()}><FileImage size={15} /></button></div><div className="canvas-tools"><span className="canvas-dimensions">{document.width} × {document.height}</span><span className="mini-separator" /><button className="zoom-button" onClick={() => setZoom(Math.max(40, zoom - 10))}>−</button><span className="zoom-value">{zoom}%</span><button className="zoom-button" onClick={() => setZoom(Math.min(120, zoom + 10))}>+</button></div></div>
+        <div className="canvas-workspace"><div className="ruler ruler-top"><span>0</span><span>240</span><span>480</span><span>720</span><span>960</span><span>1200</span><span>1440</span></div><div className="ruler ruler-left"><span>0</span><span>160</span><span>320</span><span>480</span><span>640</span><span>800</span><span>960</span></div>
+          <div className="canvas-frame" style={{ width: `${Math.round(document.width * zoom / 100)}px`, height: `${Math.round(document.height * zoom / 100)}px` }}><svg ref={svgRef} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} className="artboard" style={{ background: document.background }}>
+            {document.nodes.map((node) => node.visible && <g key={node.id} data-node="true" opacity={node.opacity / 100} transform={`rotate(${node.rotation} ${node.x + node.width / 2} ${node.y + node.height / 2})`} onPointerDown={(event) => onNodeDown(event, node)} onPointerMove={onNodeMove} onPointerUp={onNodeUp}>
+              {node.kind === 'rect' && <rect x={node.x} y={node.y} width={node.width} height={node.height} rx="7" fill={node.fill} />}
+              {node.kind === 'ellipse' && <ellipse cx={node.x + node.width / 2} cy={node.y + node.height / 2} rx={node.width / 2} ry={node.height / 2} fill={node.fill} />}
+              {node.kind === 'text' && <text x={node.x} y={node.y + (node.fontSize ?? 40)} fontSize={node.fontSize ?? 40} fontWeight="600" fill={node.fill}>{node.text}</text>}
+              {node.kind === 'image' && node.src && <image href={node.src} x={node.x} y={node.y} width={node.width} height={node.height} preserveAspectRatio="xMidYMid slice" />}
+              {selectedId === node.id && <rect className="selection-outline" x={node.x - 2} y={node.y - 2} width={node.width + 4} height={node.height + 4} fill="none" stroke="#7277ff" strokeWidth={2} strokeDasharray="7 4" pointerEvents="none" />}
+            </g>)}
+            {!document.nodes.length && <g pointerEvents="none"><text x="720" y="450" textAnchor="middle" fill="#8d8d91" fontSize="27" fontWeight="600">아이디어를 캔버스에 담아보세요</text><text x="720" y="488" textAnchor="middle" fill="#a5a5a8" fontSize="17">왼쪽 도구를 선택하고 캔버스를 클릭해 오브젝트를 추가하세요</text></g>}
+          </svg></div>
+        </div><footer className="bottom-bar"><div><span className="bottom-indicator" />{document.nodes.length}개 오브젝트<span className="bottom-separator">·</span>1440 × 960 px</div><div><span className="bottom-tip">드래그하여 이동</span><span className="bottom-separator">·</span><button className="bottom-fit" onClick={() => setZoom(82)}>화면에 맞춤</button></div></footer>
+      </main>
+      <aside className="right-sidebar">
+        <section className="panel layers-panel"><div className="panel-heading"><div><Layers size={15} /><h2>레이어</h2><span className="count-pill">{document.nodes.length}</span></div><button className="panel-menu" onClick={() => addNode('rect')} title="레이어 추가">+</button></div>
+          <div className="layer-list">{document.nodes.length === 0 && <div className="empty-layers">레이어가 아직 없습니다<br /><span>캔버스에 오브젝트를 추가해 보세요</span></div>}{[...document.nodes].reverse().map((node) => <div key={node.id} className={`layer-row ${selectedId === node.id ? 'selected' : ''}`} onClick={() => setSelectedId(node.id)}><button className="layer-visibility" title={node.visible ? '숨기기' : '표시하기'} onClick={(event) => { event.stopPropagation(); updateNode(node.id, { visible: !node.visible }) }}>{node.visible ? <Eye size={14} /> : <EyeOff size={14} />}</button><div className={`layer-thumb thumb-${node.kind}`} style={{ color: node.fill }}><NodeIcon kind={node.kind} /></div><span className="layer-name">{node.name}</span><button className={`layer-lock ${node.locked ? 'locked' : ''}`} title={node.locked ? '잠금 해제' : '잠금'} onClick={(event) => { event.stopPropagation(); updateNode(node.id, { locked: !node.locked }) }}><LockKeyhole size={12} /></button></div>)}</div>
+        </section>
+        <section className="panel properties-panel"><div className="panel-heading"><div><span className="properties-icon">◈</span><h2>속성</h2></div>{selected && <span className="selected-kind">{selected.kind.toUpperCase()}</span>}</div>
+          {!selected ? <div className="empty-properties"><div className="empty-cursor"><MousePointer2 size={17} /></div><strong>오브젝트를 선택하세요</strong><span>캔버스 또는 레이어 패널에서<br />오브젝트를 선택하면 속성을 편집할 수 있어요</span></div> : <div className="property-content">
+            <label className="field-label">이름</label><input className="text-input" value={selected.name} onChange={(event) => updateNode(selected.id, { name: event.target.value })} />
+            <label className="field-label position-label">위치</label><div className="field-grid"><NumberField label="X" value={selected.x} onChange={(event) => editDimension('x', event)} /><NumberField label="Y" value={selected.y} onChange={(event) => editDimension('y', event)} /></div>
+            <label className="field-label position-label">크기</label><div className="field-grid"><NumberField label="W" value={selected.width} onChange={(event) => editDimension('width', event)} /><NumberField label="H" value={selected.height} onChange={(event) => editDimension('height', event)} /></div>
+            <div className="property-row rotation-row"><label>회전</label><div className="number-control"><input type="number" value={selected.rotation} onChange={(event) => editDimension('rotation', event)} /><span>°</span></div></div>
+            {selected.kind === 'text' && <><label className="field-label position-label">텍스트</label><textarea className="text-input text-area" value={selected.text ?? ''} onChange={(event) => updateNode(selected.id, { text: event.target.value })} /><div className="property-row"><label>크기</label><div className="number-control"><input type="number" value={selected.fontSize ?? 40} onChange={(event) => updateNode(selected.id, { fontSize: Number(event.target.value) })} /><span>px</span></div></div></>}
+            {selected.kind !== 'image' && <><label className="field-label position-label">채우기</label><div className="color-control"><span className="color-preview" style={{ background: selected.fill }} /><input aria-label="색상 코드" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /><input aria-label="색상 선택" type="color" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /></div></>}
+            <div className="property-row opacity-row"><label>불투명도</label><span className="opacity-number">{selected.opacity}%</span></div><input className="opacity-slider" type="range" min="0" max="100" value={selected.opacity} onChange={(event) => updateNode(selected.id, { opacity: Number(event.target.value) })} />
+            <div className="swatches">{palettes.map((color) => <button key={color} className={`swatch ${selected.fill === color ? 'chosen' : ''}`} style={{ background: color }} title={color} onClick={() => updateNode(selected.id, { fill: color })} />)}</div>
+            <div className="layer-order"><button onClick={() => reorder(selected.id, 1)}><ArrowUp size={13} />앞으로</button><button onClick={() => reorder(selected.id, -1)}><ArrowDown size={13} />뒤로</button></div>
+          </div>}
+        </section>
+      </aside>
+    </div>
+  </div>
+}
+
+function ToolButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }) { return <button className={`tool-button ${active ? 'active' : ''}`} title={label} aria-label={label} onClick={onClick}>{children}</button> }
+function NodeIcon({ kind }: { kind: NodeKind }) { return kind === 'ellipse' ? <Circle size={15} /> : kind === 'text' ? <Type size={15} /> : kind === 'image' ? <FileImage size={15} /> : <Square size={15} /> }
+function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (event: ChangeEvent<HTMLInputElement>) => void }) { return <label className="number-field"><span>{label}</span><input type="number" value={Math.round(value)} onChange={onChange} /></label> }

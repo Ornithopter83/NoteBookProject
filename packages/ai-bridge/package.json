@@ -1,0 +1,10 @@
+﻿{
+  "name": "@northstar/ai-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Conservative PDF-compatible Illustrator inspection and vector/text interchange.",
+  "exports": "./src/index.js",
+  "scripts": { "test": "node test/ai-bridge.test.js", "check": "node --check src/index.js && node test/ai-bridge.test.js" },
+  "engines": { "node": ">=20" }
+}

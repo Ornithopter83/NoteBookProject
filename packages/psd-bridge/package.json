@@ -1,0 +1,26 @@
+{
+  "name": "@northstar/psd-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Safe, pixel-preserving PSD layer bridge based on ag-psd",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node dist/test/roundtrip.test.js"
+  },
+  "dependencies": {
+    "ag-psd": "^31.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3"
+  }
+}
