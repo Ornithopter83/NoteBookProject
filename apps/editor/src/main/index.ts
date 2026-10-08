@@ -3,6 +3,7 @@ import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
+import { openPsd, type LayerChanges, type PsdLayerView } from '../../../../packages/psd-bridge/src/index'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
@@ -10,6 +11,14 @@ const isDev = Boolean(rendererUrl)
 const rendererHtml = path.resolve(here, '../renderer/index.html')
 const preloadPath = path.resolve(here, '../preload/index.js')
 let activeDocumentPath: string | undefined
+const psdSessions = new Map<string, ReturnType<typeof openPsd>>()
+
+function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
+  return tree.map((layer) => ({
+    ...layer,
+    children: layer.children ? flattenPsdTree(layer.children) : undefined
+  }))
+}
 
 function allowsRendererNavigation(target: string): boolean {
   try {
@@ -75,10 +84,18 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
 ipcMain.handle('document:open', async () => {
   let filePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env.NORTHSTAR_GUI_SMOKE_FILE : undefined
   if (!filePath) {
-    const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: 'Northstar 문서', extensions: ['nbdoc'] }] }
+    const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: '지원 문서', extensions: ['nbdoc', 'psd'] }, { name: 'Photoshop 문서', extensions: ['psd'] }, { name: 'Northstar 문서', extensions: ['nbdoc'] }] }
     const result = await dialog.showOpenDialog(options)
     if (result.canceled || !result.filePaths[0]) return null
     filePath = result.filePaths[0]
+  }
+  if (path.extname(filePath).toLowerCase() === '.psd') {
+    const psd = openPsd(await readFile(filePath))
+    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    psdSessions.clear()
+    psdSessions.set(sessionId, psd)
+    activeDocumentPath = filePath
+    return { filePath, psd: { sessionId, name: path.basename(filePath, '.psd'), width: psd.width, height: psd.height, bitDepth: psd.bitDepth, layers: flattenPsdTree(psd.readTree()), warnings: psd.warnings } }
   }
   const document = validateDocument(JSON.parse(await readFile(filePath, 'utf8')))
   const assetRoot = path.resolve(path.dirname(filePath), `${path.basename(filePath, '.nbdoc')}.assets`)
@@ -98,6 +115,28 @@ ipcMain.handle('document:open', async () => {
   }
   activeDocumentPath = filePath
   return { filePath, document }
+})
+
+ipcMain.handle('psd:save', async (_event, payload: { sessionId: string; edits: Array<{ id: string; changes: LayerChanges }> }) => {
+  const session = psdSessions.get(payload.sessionId)
+  if (!session) throw new Error('PSD 편집 세션이 만료되었습니다. 파일을 다시 열어 주세요.')
+  let filePath = activeDocumentPath
+  if (process.env.NORTHSTAR_GUI_SMOKE === '1') filePath = process.env.NORTHSTAR_GUI_SMOKE_PSD_FILE ?? filePath
+  if (!filePath) {
+    const result = await dialog.showSaveDialog({ title: 'PSD 저장', defaultPath: 'Untitled.psd', filters: [{ name: 'Photoshop 문서', extensions: ['psd'] }] })
+    if (result.canceled || !result.filePath) return null
+    filePath = result.filePath.toLowerCase().endsWith('.psd') ? result.filePath : `${result.filePath}.psd`
+  }
+  const beforeIds = new Set<string>()
+  const collect = (layers: PsdLayerView[]) => layers.forEach((layer) => { beforeIds.add(layer.id); if (layer.children) collect(layer.children) })
+  collect(session.readTree())
+  for (const edit of payload.edits) {
+    if (!beforeIds.has(edit.id)) throw new Error('레이어 구조가 변경되어 저장할 수 없습니다. PSD를 다시 열어 주세요.')
+    session.editLayer(edit.id, edit.changes)
+  }
+  await writeFile(filePath, session.save())
+  activeDocumentPath = filePath
+  return { filePath }
 })
 
 ipcMain.handle('image:import', async () => {

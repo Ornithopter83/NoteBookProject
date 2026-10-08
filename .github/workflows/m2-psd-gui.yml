@@ -1,0 +1,39 @@
+name: M2 PSD Windows GUI validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-psd-gui:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install editor dependencies
+        working-directory: apps/editor
+        run: npm ci
+
+      - name: Build editor with PSD Bridge
+        working-directory: apps/editor
+        run: npm run build
+
+      - name: Typecheck editor
+        working-directory: apps/editor
+        run: npm run typecheck
+
+      - name: Run PSD open-edit-save-reopen GUI smoke
+        working-directory: apps/editor
+        run: npm run smoke:psd-gui
+
+      - name: Run existing .nbdoc GUI smoke
+        working-directory: apps/editor
+        run: npm run smoke:gui

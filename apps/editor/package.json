@@ -11,9 +11,11 @@
     "preview": "electron-vite preview",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "smoke:gui": "node scripts/m1-gui-smoke.cjs"
+    "smoke:gui": "node scripts/m1-gui-smoke.cjs",
+    "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs"
   },
   "dependencies": {
+    "ag-psd": "^31.0.3",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
