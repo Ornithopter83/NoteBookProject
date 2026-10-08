@@ -27,7 +27,7 @@ async function targetAt(port) {
   const until = Date.now() + 30000
   while (Date.now() < until) {
     if (childError) throw childError
-    if (child.exitCode !== null) throw new Error(`Electron exited with ${child.exitCode}`)
+    if (child && child.exitCode !== null) throw new Error(`Electron exited with ${child.exitCode}`)
     try {
       const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
       const target = targets.find((item) => item.type === 'page' && item.webSocketDebuggerUrl)
@@ -56,6 +56,44 @@ async function click(expression, description) {
 }
 async function setValue(selector, value, tag = 'input') {
   return evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; const setter = Object.getOwnPropertyDescriptor(${tag === 'textarea' ? 'HTMLTextAreaElement' : 'HTMLInputElement'}.prototype, 'value').set; setter.call(e, ${JSON.stringify(String(value))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return true })()`)
+}
+
+async function canvasPathHit() {
+  return evaluate(`(() => {
+    const svg = document.querySelector('[data-testid="ai-artboard"]')
+    const path = svg?.querySelector('[data-canvas-path]')
+    if (!svg || !path) return { error: 'AI SVG path is missing' }
+    const box = path.getBBox()
+    const matrix = path.getScreenCTM()
+    const svgPoint = svg.createSVGPoint()
+    const candidates = []
+    for (let row = 1; row < 20; row++) for (let column = 1; column < 20; column++) {
+      const x = box.x + box.width * column / 20
+      const y = box.y + box.height * row / 20
+      const local = new DOMPoint(x, y)
+      let inFill = false
+      try { inFill = path.isPointInFill(local) } catch {}
+      if (!inFill) continue
+      svgPoint.x = x; svgPoint.y = y
+      const screen = svgPoint.matrixTransform(matrix)
+      const hit = document.elementFromPoint(screen.x, screen.y)
+      candidates.push({ x, y, clientX: screen.x, clientY: screen.y, hit: hit?.tagName, hitNodeId: hit?.closest('[data-node]')?.getAttribute('data-node-id') ?? null })
+      if (hit === path || path.contains(hit)) return { ...candidates[candidates.length - 1], rect: path.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, pointerEvents: getComputedStyle(path).pointerEvents, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, candidates: candidates.length }
+    }
+    return { error: 'No painted path point is the DOM hit target', rect: path.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, pointerEvents: getComputedStyle(path).pointerEvents, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, candidates: candidates.slice(0, 12) }
+  })()`)
+}
+
+async function canvasFailureState() {
+  return evaluate(`(() => {
+    const svg = document.querySelector('[data-testid="ai-artboard"]')
+    const path = svg?.querySelector('[data-canvas-path]')
+    const outline = svg?.querySelector('.selection-outline')
+    const rect = path?.getBoundingClientRect()
+    const point = rect ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null
+    const hit = point ? document.elementFromPoint(point.x, point.y) : null
+    return { selectedLayer: document.querySelector('.layer-row.selected')?.innerText ?? null, selectedObjectId: svg?.querySelector('.selection-outline')?.parentElement?.getAttribute('data-node-id') ?? null, outline: Boolean(outline), clickPoint: point, hit: hit ? { tag: hit.tagName, id: hit.id, className: String(hit.className?.baseVal ?? hit.className ?? ''), nodeId: hit.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null } : null, pointerTrace: window.__canvasPointerTrace ?? [], path: path ? { d: path.getAttribute('d'), fill: path.getAttribute('fill'), fillRule: path.getAttribute('fill-rule'), pointerEvents: getComputedStyle(path).pointerEvents, rect: rect.toJSON(), bbox: (() => { const b = path.getBBox(); return { x: b.x, y: b.y, width: b.width, height: b.height } })() } : null, svg: svg ? { rect: svg.getBoundingClientRect().toJSON(), viewBox: svg.getAttribute('viewBox'), pointerEvents: getComputedStyle(svg).pointerEvents } : null, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } }
+  })()`)
 }
 
 async function main() {
@@ -94,7 +132,11 @@ async function main() {
       if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails?.text || 'Renderer exception')
       if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error') errors.push(message.params.entry.text)
     })
-    await once(socket, 'open')
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out connecting to Electron CDP WebSocket')), 10000)
+      socket.addEventListener('open', () => { clearTimeout(timeout); resolve() }, { once: true })
+      socket.addEventListener('error', (event) => { clearTimeout(timeout); reject(new Error(`Electron CDP WebSocket failed: ${event.message || 'connection error'}`)) }, { once: true })
+    })
     await cdp('Runtime.enable'); await cdp('Log.enable')
     await waitFor("document.querySelector('.app-shell')", 'editor window')
     await click("Array.from(document.querySelectorAll('button')).find((button) => button.innerText.includes('열기'))", 'open AI')
@@ -104,10 +146,17 @@ async function main() {
     assert.equal(await evaluate("document.querySelector('[data-testid=ai-artboard] text')?.textContent"), 'AI Bridge GUI')
     assert.equal(await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')"), 'M 20 155 L 110 155 C 130 150 135 100 95 85 L 20 90 Z')
 
-    const pathCenter = await evaluate("(() => { const r = document.querySelector('[data-testid=ai-artboard] path').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()")
-    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: pathCenter.x, y: pathCenter.y, button: 'left', clickCount: 1 })
-    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pathCenter.x, y: pathCenter.y, button: 'left', clickCount: 1 })
-    await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')", 'select path on canvas')
+    const pathHit = await canvasPathHit()
+    assert.ok(!pathHit.error, `Could not find an actual painted canvas hit point: ${JSON.stringify(pathHit)}`)
+    log(`Canvas path hit point: ${JSON.stringify(pathHit)}`)
+    await evaluate(`(() => { const svg = document.querySelector('[data-testid="ai-artboard"]'); window.__canvasPointerTrace = []; for (const type of ['pointerdown', 'pointerup', 'click']) svg.addEventListener(type, (event) => window.__canvasPointerTrace.push({ type, pointerType: event.pointerType ?? null, button: event.button, clientX: event.clientX, clientY: event.clientY, target: event.target?.tagName, nodeId: event.target?.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null, defaultPrevented: event.defaultPrevented }), true) })()`)
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pathHit.clientX, y: pathHit.clientY, button: 'none' })
+    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
+    try { await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')", 'select path on canvas') }
+    catch (error) { log(`Canvas selection diagnostic: ${JSON.stringify(await canvasFailureState())}`); throw error }
+    assert.ok(await evaluate("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.matches('[data-node-id]')"), 'Canvas click did not select an SVG node')
+    assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `CDP click did not deliver PointerEvent to the selected canvas path: ${JSON.stringify(await canvasFailureState())}`)
     assert.equal(await setValue('input[aria-label="X"]', 25), true)
     assert.equal(await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')?.startsWith('M 25 155')"), true, 'Vector path edit was not reflected in the canvas')
 
@@ -126,11 +175,15 @@ async function main() {
     await click("Array.from(document.querySelectorAll('button')).find((button) => button.innerText.includes('열기'))", 'reopen saved .nbdoc')
     await waitFor("document.querySelector('[data-testid=editor-artboard] path') && document.querySelector('[data-testid=editor-artboard] text')?.textContent === 'Edited AI text'", 'reopened .nbdoc contents')
     assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('fill-rule')"), 'evenodd')
+    assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('d')"), 'M 25 155 L 115 155 C 135 150 140 100 100 85 L 25 90 Z', 'Reopened vector coordinates changed')
+    assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('fill')"), saved.nodes[0].fill, 'Reopened vector fill changed')
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(aiPath)).digest('hex'), originalHash, 'Original AI bytes changed after reopen')
     await new Promise((resolve) => setTimeout(resolve, 250))
     assert.deepEqual(errors, [], `Renderer errors: ${errors.join(' | ')}`)
     log('PASS actual one-page AI opened, vector paint/geometry and ASCII text rendered, edited, saved as .nbdoc, reopened, and source AI remained byte-identical')
   } catch (error) {
     log(`FAIL: ${error.stack || error}`)
+    try { log(`Failure DOM state: ${JSON.stringify(await canvasFailureState())}`) } catch {}
     if (fs.existsSync(logPath)) log(fs.readFileSync(logPath, 'utf8'))
     throw error
   } finally {
