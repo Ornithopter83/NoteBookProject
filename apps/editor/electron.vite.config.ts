@@ -7,9 +7,13 @@ const appRoot = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@northstar/ai-bridge', '@northstar/psd-bridge', 'ag-psd'] })]
+    plugins: [externalizeDepsPlugin({ exclude: ['@northstar/ai-bridge', '@northstar/psd-bridge', 'ag-psd'] })],
+    build: { rollupOptions: { output: { format: 'es' } } }
   },
-  preload: { plugins: [externalizeDepsPlugin()] },
+  preload: {
+    plugins: [externalizeDepsPlugin()],
+    build: { rollupOptions: { output: { format: 'cjs', entryFileNames: 'index.cjs' } } }
+  },
   renderer: {
     root: appRoot,
     resolve: { alias: { '@': resolve(appRoot, 'src/renderer/src') } },

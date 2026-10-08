@@ -18,6 +18,14 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install PSD Bridge dependencies
+        working-directory: packages/psd-bridge
+        run: npm ci
+
+      - name: Build PSD Bridge
+        working-directory: packages/psd-bridge
+        run: npm run build
+
       - name: Validate AI Bridge
         working-directory: packages/ai-bridge
         run: npm run check

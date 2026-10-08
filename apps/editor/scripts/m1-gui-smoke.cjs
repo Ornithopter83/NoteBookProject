@@ -120,7 +120,7 @@ async function main() {
     assert.match(version, /^v\d+\./, `Unexpected Electron version output: ${version}`)
     log(`Electron ${version} at ${electronBin}`)
     assert.ok(fs.existsSync(path.join(appRoot, 'out/main/index.js')), 'Built main process entry is missing')
-    assert.ok(fs.existsSync(path.join(appRoot, 'out/preload/index.js')), 'Built preload entry is missing')
+    assert.ok(fs.existsSync(path.join(appRoot, 'out/preload/index.cjs')), 'Built preload entry is missing')
     assert.ok(fs.existsSync(path.join(appRoot, 'out/renderer/index.html')), 'Built renderer HTML is missing')
   })
 

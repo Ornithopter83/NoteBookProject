@@ -1,4 +1,4 @@
-﻿const MAX_BYTES = 64 * 1024 * 1024;
+const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_OBJECTS = 100_000;
 const MAX_PAGES = 500;
 const MAX_OPERANDS = 4096;

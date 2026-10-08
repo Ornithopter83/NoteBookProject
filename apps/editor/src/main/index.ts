@@ -10,7 +10,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
 const isDev = Boolean(rendererUrl)
 const rendererHtml = path.resolve(here, '../renderer/index.html')
-const preloadPath = path.resolve(here, '../preload/index.js')
+const preloadPath = path.resolve(here, '../preload/index.cjs')
 let activeDocumentPath: string | undefined
 let activeAiSourcePath: string | undefined
 const psdSessions = new Map<string, ReturnType<typeof openPsd>>()

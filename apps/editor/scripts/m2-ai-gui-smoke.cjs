@@ -59,8 +59,8 @@ async function setValue(selector, value, tag = 'input') {
 }
 
 async function main() {
-  const { writePdf } = await import('@northstar/ai-bridge')
-  const fixture = writePdf({
+  const { inspectAi, writePdf } = await import('@northstar/ai-bridge')
+  const fixture = Buffer.from(writePdf({
     format: 'pdf-compatible-ai-subset', pdfVersion: '1.4', pages: [{ width: 240, height: 180, items: [
       { type: 'path', segments: [
         { op: 'M', points: [[20, 25]] }, { op: 'L', points: [[110, 25]] },
@@ -68,7 +68,8 @@ async function main() {
         { op: 'L', points: [[20, 90]] }, { op: 'Z', points: [] }
       ], paint: 'B*' },
       { type: 'text', text: 'AI Bridge GUI', position: [30, 140], fontSize: 18 }
-    ] }] })
+    ] }] }).toString('ascii').replace('%AI-Bridge-Subset', '%AI1Bridge-Subset'), 'ascii')
+  assert.equal(inspectAi(fixture).status, 'pdf-compatible-ai', 'AI smoke fixture must carry a validated Illustrator marker')
   fs.writeFileSync(aiPath, fixture)
   const originalHash = crypto.createHash('sha256').update(fs.readFileSync(aiPath)).digest('hex')
   const electron = require('electron')
