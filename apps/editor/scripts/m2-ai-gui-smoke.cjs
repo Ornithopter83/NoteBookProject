@@ -84,6 +84,28 @@ async function canvasPathHit() {
   })()`)
 }
 
+async function canvasTextHit() {
+  return evaluate(`(() => {
+    const svg = document.querySelector('[data-testid="ai-artboard"]')
+    const text = svg?.querySelector('text')
+    if (!svg || !text) return { error: 'AI SVG text is missing' }
+    const box = text.getBBox()
+    const matrix = text.getScreenCTM()
+    const svgPoint = svg.createSVGPoint()
+    const candidates = []
+    for (let row = 1; row < 10; row++) for (let column = 1; column < 30; column++) {
+      const x = box.x + box.width * column / 30
+      const y = box.y + box.height * row / 10
+      svgPoint.x = x; svgPoint.y = y
+      const screen = svgPoint.matrixTransform(matrix)
+      const hit = document.elementFromPoint(screen.x, screen.y)
+      candidates.push({ x, y, clientX: screen.x, clientY: screen.y, hit: hit?.tagName, hitNodeId: hit?.closest('[data-node]')?.getAttribute('data-node-id') ?? null })
+      if (hit === text || text.contains(hit)) return { ...candidates[candidates.length - 1], rect: text.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } }
+    }
+    return { error: 'No visible text point is the DOM hit target', rect: text.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, candidates: candidates.slice(0, 12) }
+  })()`)
+}
+
 async function canvasFailureState() {
   return evaluate(`(() => {
     const svg = document.querySelector('[data-testid="ai-artboard"]')
@@ -152,15 +174,30 @@ async function main() {
     await evaluate(`(() => { const svg = document.querySelector('[data-testid="ai-artboard"]'); window.__canvasPointerTrace = []; for (const type of ['pointerdown', 'pointerup', 'click']) svg.addEventListener(type, (event) => window.__canvasPointerTrace.push({ type, pointerType: event.pointerType ?? null, button: event.button, clientX: event.clientX, clientY: event.clientY, target: event.target?.tagName, nodeId: event.target?.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null, defaultPrevented: event.defaultPrevented }), true) })()`)
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pathHit.clientX, y: pathHit.clientY, button: 'none' })
     await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
+    try { await waitFor("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown')", 'canvas PointerEvent delivery') }
+    catch (error) {
+      log(`Canvas PointerEvent diagnostic: ${JSON.stringify(await canvasFailureState())}`)
+      await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
+      throw error
+    }
     await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
     try { await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')", 'select path on canvas') }
     catch (error) { log(`Canvas selection diagnostic: ${JSON.stringify(await canvasFailureState())}`); throw error }
     assert.ok(await evaluate("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.matches('[data-node-id]')"), 'Canvas click did not select an SVG node')
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `CDP click did not deliver PointerEvent to the selected canvas path: ${JSON.stringify(await canvasFailureState())}`)
+    assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerup')"), `CDP click did not complete its PointerEvent sequence: ${JSON.stringify(await canvasFailureState())}`)
     assert.equal(await setValue('input[aria-label="X"]', 25), true)
     assert.equal(await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')?.startsWith('M 25 155')"), true, 'Vector path edit was not reflected in the canvas')
 
-    await click("Array.from(document.querySelectorAll('.layer-row')).find((row) => row.innerText.includes('AI 텍스트'))", 'select imported text')
+    const textHit = await canvasTextHit()
+    assert.ok(!textHit.error, `Could not find a visible canvas text hit point: ${JSON.stringify(textHit)}`)
+    log(`Canvas text hit point: ${JSON.stringify(textHit)}`)
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: textHit.clientX, y: textHit.clientY, button: 'none' })
+    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: textHit.clientX, y: textHit.clientY, button: 'left', clickCount: 1 })
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: textHit.clientX, y: textHit.clientY, button: 'left', clickCount: 1 })
+    try { await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.querySelector('text')", 'select text on canvas') }
+    catch (error) { log(`Canvas text selection diagnostic: ${JSON.stringify(await canvasFailureState())}`); throw error }
+    assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `Canvas click did not deliver PointerEvent to the selected text: ${JSON.stringify(await canvasFailureState())}`)
     assert.equal(await setValue('.text-area', 'Edited AI text', 'textarea'), true)
     await click("document.querySelector('button.primary')", 'save converted document')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('AI 변환 문서를 .nbdoc로 저장했습니다')", 'nbdoc save')
