@@ -57,6 +57,39 @@ async function click(expression, description) {
 async function setValue(selector, value, tag = 'input') {
   return evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; const setter = Object.getOwnPropertyDescriptor(${tag === 'textarea' ? 'HTMLTextAreaElement' : 'HTMLInputElement'}.prototype, 'value').set; setter.call(e, ${JSON.stringify(String(value))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return true })()`)
 }
+function pathCoordinates(d) { return (d.match(/-?(?:\d+\.?\d*|\.\d+)/g) || []).map(Number) }
+function assertCoordinatesClose(actual, expected, description) {
+  assert.equal(actual.length, expected.length, `${description}: coordinate count changed`)
+  for (let index = 0; index < expected.length; index++) assert.ok(Math.abs(actual[index] - expected[index]) < 0.02, `${description}: coordinate ${index} changed from ${expected[index]} to ${actual[index]}`)
+}
+function assertPathTranslated(before, after, description) {
+  const start = pathCoordinates(before), end = pathCoordinates(after)
+  assert.equal(end.length, start.length, `${description}: SVG path coordinate count changed`)
+  assert.ok(start.length >= 4, `${description}: SVG path had no coordinates`)
+  const dx = end[0] - start[0], dy = end[1] - start[1]
+  assert.ok(Math.hypot(dx, dy) >= 2, `${description}: drag did not move the path (${dx}, ${dy})`)
+  for (let i = 0; i < start.length; i += 2) {
+    assert.ok(Math.abs((end[i] - start[i]) - dx) < 0.02, `${description}: path X coordinates were distorted at ${i / 2}`)
+    assert.ok(Math.abs((end[i + 1] - start[i + 1]) - dy) < 0.02, `${description}: path Y coordinates were distorted at ${i / 2}`)
+  }
+  return { dx, dy }
+}
+async function dragCanvas(hit, description) {
+  const before = await evaluate('window.__canvasPointerTrace.length')
+  const end = { x: hit.clientX + 12, y: hit.clientY + 8 }
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.clientX, y: hit.clientY, button: 'none' })
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.clientX, y: hit.clientY, button: 'left', clickCount: 1 })
+  try {
+    await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === 'pointerdown')`, `${description} drag PointerEvent`)
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: end.x, y: end.y, button: 'left', buttons: 1 })
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: end.x, y: end.y, button: 'left', clickCount: 1 })
+    await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === 'pointerup')`, `${description} drag completion`)
+  } catch (error) {
+    log(`${description} drag diagnostic: ${JSON.stringify(await canvasFailureState())}`)
+    try { await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: end.x, y: end.y, button: 'left', clickCount: 1 }) } catch {}
+    throw error
+  }
+}
 
 async function canvasPathHit() {
   return evaluate(`(() => {
@@ -66,18 +99,18 @@ async function canvasPathHit() {
     const box = path.getBBox()
     const matrix = path.getScreenCTM()
     const svgPoint = svg.createSVGPoint()
+    const localPoint = svg.createSVGPoint()
     const candidates = []
     for (let row = 1; row < 20; row++) for (let column = 1; column < 20; column++) {
       const x = box.x + box.width * column / 20
       const y = box.y + box.height * row / 20
-      const local = new DOMPoint(x, y)
+      localPoint.x = x; localPoint.y = y
       let inFill = false
-      try { inFill = path.isPointInFill(local) } catch {}
-      if (!inFill) continue
+      try { inFill = path.isPointInFill(localPoint) } catch {}
       svgPoint.x = x; svgPoint.y = y
       const screen = svgPoint.matrixTransform(matrix)
       const hit = document.elementFromPoint(screen.x, screen.y)
-      candidates.push({ x, y, clientX: screen.x, clientY: screen.y, hit: hit?.tagName, hitNodeId: hit?.closest('[data-node]')?.getAttribute('data-node-id') ?? null })
+      candidates.push({ x, y, inFill, clientX: screen.x, clientY: screen.y, hit: hit?.tagName, hitNodeId: hit?.closest('[data-node]')?.getAttribute('data-node-id') ?? null })
       if (hit === path || path.contains(hit)) return { ...candidates[candidates.length - 1], rect: path.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, pointerEvents: getComputedStyle(path).pointerEvents, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, candidates: candidates.length }
     }
     return { error: 'No painted path point is the DOM hit target', rect: path.getBoundingClientRect().toJSON(), bbox: { x: box.x, y: box.y, width: box.width, height: box.height }, pointerEvents: getComputedStyle(path).pointerEvents, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, candidates: candidates.slice(0, 12) }
@@ -114,7 +147,8 @@ async function canvasFailureState() {
     const rect = path?.getBoundingClientRect()
     const point = rect ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null
     const hit = point ? document.elementFromPoint(point.x, point.y) : null
-    return { selectedLayer: document.querySelector('.layer-row.selected')?.innerText ?? null, selectedObjectId: svg?.querySelector('.selection-outline')?.parentElement?.getAttribute('data-node-id') ?? null, outline: Boolean(outline), clickPoint: point, hit: hit ? { tag: hit.tagName, id: hit.id, className: String(hit.className?.baseVal ?? hit.className ?? ''), nodeId: hit.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null } : null, pointerTrace: window.__canvasPointerTrace ?? [], path: path ? { d: path.getAttribute('d'), fill: path.getAttribute('fill'), fillRule: path.getAttribute('fill-rule'), pointerEvents: getComputedStyle(path).pointerEvents, rect: rect.toJSON(), bbox: (() => { const b = path.getBBox(); return { x: b.x, y: b.y, width: b.width, height: b.height } })() } : null, svg: svg ? { rect: svg.getBoundingClientRect().toJSON(), viewBox: svg.getAttribute('viewBox'), pointerEvents: getComputedStyle(svg).pointerEvents } : null, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } }
+    const text = svg?.querySelector('text')
+    return { selectedLayer: document.querySelector('.layer-row.selected')?.innerText ?? null, selectedObjectId: svg?.querySelector('.selection-outline')?.parentElement?.getAttribute('data-node-id') ?? null, outline: Boolean(outline), clickPoint: point, hit: hit ? { tag: hit.tagName, id: hit.id, className: String(hit.className?.baseVal ?? hit.className ?? ''), nodeId: hit.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null } : null, pointerTrace: window.__canvasPointerTrace ?? [], path: path ? { d: path.getAttribute('d'), fill: path.getAttribute('fill'), fillRule: path.getAttribute('fill-rule'), pointerEvents: getComputedStyle(path).pointerEvents, rect: rect.toJSON(), bbox: (() => { const b = path.getBBox(); return { x: b.x, y: b.y, width: b.width, height: b.height } })() } : null, text: text ? { text: text.textContent, x: text.getAttribute('x'), y: text.getAttribute('y'), rect: text.getBoundingClientRect().toJSON(), bbox: (() => { const b = text.getBBox(); return { x: b.x, y: b.y, width: b.width, height: b.height } })() } : null, svg: svg ? { rect: svg.getBoundingClientRect().toJSON(), viewBox: svg.getAttribute('viewBox'), pointerEvents: getComputedStyle(svg).pointerEvents } : null, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio } }
   })()`)
 }
 
@@ -186,8 +220,13 @@ async function main() {
     assert.ok(await evaluate("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.matches('[data-node-id]')"), 'Canvas click did not select an SVG node')
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `CDP click did not deliver PointerEvent to the selected canvas path: ${JSON.stringify(await canvasFailureState())}`)
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerup')"), `CDP click did not complete its PointerEvent sequence: ${JSON.stringify(await canvasFailureState())}`)
+    const pathBeforeDrag = await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')")
+    await dragCanvas(pathHit, 'Vector path')
+    const pathAfterDrag = await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')")
+    const pathDrag = assertPathTranslated(pathBeforeDrag, pathAfterDrag, 'Canvas vector drag')
+    log(`Canvas vector drag translated every path point: ${JSON.stringify(pathDrag)}`)
     assert.equal(await setValue('input[aria-label="X"]', 25), true)
-    assert.equal(await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')?.startsWith('M 25 155')"), true, 'Vector path edit was not reflected in the canvas')
+    assert.ok(Math.abs(pathCoordinates(await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')"))[0] - 25) < 0.02, 'Vector X position edit was not reflected in the canvas')
 
     const textHit = await canvasTextHit()
     assert.ok(!textHit.error, `Could not find a visible canvas text hit point: ${JSON.stringify(textHit)}`)
@@ -198,6 +237,11 @@ async function main() {
     try { await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.querySelector('text')", 'select text on canvas') }
     catch (error) { log(`Canvas text selection diagnostic: ${JSON.stringify(await canvasFailureState())}`); throw error }
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `Canvas click did not deliver PointerEvent to the selected text: ${JSON.stringify(await canvasFailureState())}`)
+    const textBeforeDrag = await evaluate("{ const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } }")
+    await dragCanvas(textHit, 'AI text')
+    const textAfterDrag = await evaluate("{ const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } }")
+    assert.notDeepEqual(textAfterDrag, textBeforeDrag, `Canvas text drag did not change its position: ${JSON.stringify(await canvasFailureState())}`)
+    log(`Canvas text drag changed rendered position: ${JSON.stringify({ before: textBeforeDrag, after: textAfterDrag })}`)
     assert.equal(await setValue('.text-area', 'Edited AI text', 'textarea'), true)
     await click("document.querySelector('button.primary')", 'save converted document')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('AI 변환 문서를 .nbdoc로 저장했습니다')", 'nbdoc save')
@@ -205,15 +249,22 @@ async function main() {
     const saved = JSON.parse(fs.readFileSync(nbdocPath, 'utf8'))
     assert.equal(saved.width, 240); assert.equal(saved.height, 180)
     assert.equal(saved.nodes[0].kind, 'path'); assert.equal(saved.nodes[0].pathPaint, 'B*')
-    assert.deepEqual(saved.nodes[0].pathSegments[2], { op: 'C', points: [[135, 30], [140, 80], [100, 95]] })
+    assert.equal(saved.nodes[0].pathSegments[2].op, 'C')
+    assertCoordinatesClose(saved.nodes[0].pathSegments[2].points.flat(), [135, 30 - pathDrag.dy, 140, 80 - pathDrag.dy, 100, 95 - pathDrag.dy], 'Saved vector control points')
     assert.equal(saved.nodes[1].kind, 'aiText'); assert.equal(saved.nodes[1].text, 'Edited AI text')
+    assertCoordinatesClose([saved.nodes[1].x, saved.nodes[1].y], [Number(textAfterDrag.x), 180 - Number(textAfterDrag.y)], 'Saved AI text drag position')
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(aiPath)).digest('hex'), originalHash, 'Original AI bytes changed')
 
     await click("Array.from(document.querySelectorAll('button')).find((button) => button.innerText.includes('열기'))", 'reopen saved .nbdoc')
     await waitFor("document.querySelector('[data-testid=editor-artboard] path') && document.querySelector('[data-testid=editor-artboard] text')?.textContent === 'Edited AI text'", 'reopened .nbdoc contents')
     assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('fill-rule')"), 'evenodd')
-    assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('d')"), 'M 25 155 L 115 155 C 135 150 140 100 100 85 L 25 90 Z', 'Reopened vector coordinates changed')
+    assertCoordinatesClose(pathCoordinates(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('d')")), [25, 155 + pathDrag.dy, 115, 155 + pathDrag.dy, 135, 150 + pathDrag.dy, 140, 100 + pathDrag.dy, 100, 85 + pathDrag.dy, 25, 90 + pathDrag.dy], 'Reopened vector coordinates')
     assert.equal(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('fill')"), saved.nodes[0].fill, 'Reopened vector fill changed')
+    assert.equal(await evaluate("Number(document.querySelector('[data-testid=editor-artboard] text')?.getAttribute('x'))"), saved.nodes[1].x, 'Reopened AI text X changed')
+    assert.equal(await evaluate("180 - Number(document.querySelector('[data-testid=editor-artboard] text')?.getAttribute('y'))"), saved.nodes[1].y, 'Reopened AI text Y changed')
+    const reopenedPathCoordinates = pathCoordinates(await evaluate("document.querySelector('[data-testid=editor-artboard] path')?.getAttribute('d')"))
+    const savedPathCoordinates = saved.nodes[0].pathSegments.flatMap((segment) => segment.points.flatMap(([x, y]) => [x, 180 - y]))
+    assertCoordinatesClose(reopenedPathCoordinates, savedPathCoordinates, 'Reopened path coordinates')
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(aiPath)).digest('hex'), originalHash, 'Original AI bytes changed after reopen')
     await new Promise((resolve) => setTimeout(resolve, 250))
     assert.deepEqual(errors, [], `Renderer errors: ${errors.join(' | ')}`)
