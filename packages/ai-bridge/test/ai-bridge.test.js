@@ -33,6 +33,25 @@ test('rejects damaged xref offsets and unsupported operators', () => {
   const result = inspectAi(Buffer.from(unsupported, 'ascii'));
   assert.equal(result.status, 'unsupported');
   assert.match(result.reason, /unsupported/);
+
+  const unsupportedColor = aiPdf().toString('ascii').replace('\nh\nS\n', '\nh\nrg\n');
+  assert.notEqual(unsupportedColor, aiPdf().toString('ascii'));
+  assert.equal(inspectAi(Buffer.from(unsupportedColor, 'ascii')).status, 'unsupported');
+});
+
+test('rejects unsupported page coordinate systems and text sequences without glyph advances', () => {
+  const original = aiPdf().toString('ascii');
+  const rotated = original.replace('/Parent', '/Rotate');
+  assert.notEqual(rotated, original);
+  assert.equal(inspectAi(Buffer.from(rotated, 'ascii')).status, 'unsupported');
+
+  const alternateBox = original.replace('/MediaBox', '/BleedBox');
+  assert.notEqual(alternateBox, original);
+  assert.equal(inspectAi(Buffer.from(alternateBox, 'ascii')).status, 'unsupported');
+
+  const consecutiveText = original.replace('(Hello AI) Tj ET', '() Tj (xy) Tj ET');
+  assert.notEqual(consecutiveText, original);
+  assert.equal(inspectAi(Buffer.from(consecutiveText, 'ascii')).status, 'unsupported');
 });
 
 test('transforms supported geometry and text and round-trips through PDF output', () => {

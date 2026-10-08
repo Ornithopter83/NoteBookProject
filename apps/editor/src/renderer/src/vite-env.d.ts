@@ -6,7 +6,7 @@ import type { LayerChanges } from '@northstar/psd-bridge'
 declare global {
   interface Window {
     northstar: {
-      openDocument(): Promise<{ filePath: string; document?: EditorDocument; psd?: PsdEditorDocument } | null>
+      openDocument(): Promise<{ filePath: string; document?: EditorDocument; psd?: PsdEditorDocument; aiImport?: { pdfVersion: string; sourceName: string; limitations: string } } | null>
       saveDocument(document: EditorDocument): Promise<{ filePath: string; document: EditorDocument } | null>
       importImage(): Promise<string | null>
       savePsd(sessionId: string, edits: Array<{ id: string; changes: LayerChanges }>): Promise<{ filePath: string } | null>

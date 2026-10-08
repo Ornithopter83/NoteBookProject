@@ -191,6 +191,12 @@ function visitPages(id, objects, pages, seen) {
   const object = objects.get(id);
   if (!object) fail('INVALID_PDF', `Unresolved page-tree object ${id}.`);
   const body = object.body;
+  if (/#(?:[\da-f]{2})/i.test(body)) {
+    fail('UNSUPPORTED_PDF', 'Escaped names in page-tree dictionaries are unsupported.');
+  }
+  if (/\/(?:CropBox|BleedBox|TrimBox|ArtBox|Rotate|UserUnit|Group|Annots|OC)\b/.test(body)) {
+    fail('UNSUPPORTED_PDF', 'Alternate page boxes, page rotation, page scaling, annotations, and page compositing features are unsupported.');
+  }
   if (/\/Type\s*\/Page\b/.test(body)) {
     const box = body.match(/\/MediaBox\s*\[\s*([-+\d.]+)\s+([-+\d.]+)\s+([-+\d.]+)\s+([-+\d.]+)\s*\]/);
     if (!box) fail('UNSUPPORTED_PDF', 'Pages must have a direct MediaBox.');
@@ -255,7 +261,7 @@ function tokenize(content) {
 }
 
 function parseContent(content) {
-  const tokens=tokenize(content), items=[], operands=[]; let current=null, textMode=false, textPos=[0,0], fontSize=12;
+  const tokens=tokenize(content), items=[], operands=[]; let current=null, textMode=false, textPos=[0,0], fontSize=12, textShownSincePositioning=false;
   const number = token => { if(!token||token.type!=='number') fail('UNSUPPORTED_PDF','Expected numeric operand.'); const value=Number(token.value); if(!Number.isFinite(value)) fail('INVALID_PDF','Non-finite coordinate.'); return value; };
   const flush = paint => { if(current?.segments.length && paint) items.push({type:'path',segments:current.segments,paint}); current=null; };
   for(const token of tokens) {
@@ -266,12 +272,12 @@ function parseContent(content) {
     else if(op==='h') {if(operands.length||!current)fail('INVALID_PDF','Malformed close-path operator.');current.segments.push({op:'Z',points:[]});}
     else if(['S','s','f','F','f*','B','B*','b','b*','n'].includes(op)) {if(operands.length)fail('UNSUPPORTED_PDF',`Unexpected operands for ${op}.`);if(op==='n')flush();else flush(op);}
     else if(op==='re') {const v=nums();if(v.length!==4)fail('UNSUPPORTED_PDF','Malformed rectangle.');current ??= {segments:[]};current.segments.push({op:'M',points:[[v[0],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]+v[3]]]}, {op:'L',points:[[v[0],v[1]+v[3]]]}, {op:'Z',points:[]});}
-    else if(op==='BT') {if(operands.length||textMode)fail('INVALID_PDF','Malformed text block.');flush();textMode=true;textPos=[0,0];}
+    else if(op==='BT') {if(operands.length||textMode)fail('INVALID_PDF','Malformed text block.');flush();textMode=true;textPos=[0,0];textShownSincePositioning=false;}
     else if(op==='ET') {if(operands.length||!textMode)fail('INVALID_PDF','Malformed text block.');textMode=false;}
     else if(op==='Tf') {if(operands.length!==2||operands[0].type!=='name'||operands[0].value!=='F1')fail('UNSUPPORTED_PDF','Only the validated F1 font resource is supported.');fontSize=number(operands[1]);if(fontSize<=0||fontSize>10000)fail('INVALID_PDF','Invalid font size.');}
-    else if(op==='Td'||op==='TD') {const v=nums();if(!textMode||v.length!==2)fail('UNSUPPORTED_PDF','Unsupported text positioning.');textPos=[textPos[0]+v[0],textPos[1]+v[1]];}
-    else if(op==='Tm') {const v=nums();if(!textMode||v.length!==6||v[0]!==1||v[1]!==0||v[2]!==0||v[3]!==1)fail('UNSUPPORTED_PDF','Only unrotated text matrices are supported.');textPos=[v[4],v[5]];}
-    else if(op==='Tj') {if(!textMode||operands.length!==1||operands[0].type!=='string')fail('UNSUPPORTED_PDF','Only simple ASCII Tj text is supported.');items.push({type:'text',text:operands[0].value,position:[...textPos],fontSize});}
+    else if(op==='Td'||op==='TD') {const v=nums();if(!textMode||v.length!==2)fail('UNSUPPORTED_PDF','Unsupported text positioning.');textPos=[textPos[0]+v[0],textPos[1]+v[1]];textShownSincePositioning=false;}
+    else if(op==='Tm') {const v=nums();if(!textMode||v.length!==6||v[0]!==1||v[1]!==0||v[2]!==0||v[3]!==1)fail('UNSUPPORTED_PDF','Only unrotated text matrices are supported.');textPos=[v[4],v[5]];textShownSincePositioning=false;}
+    else if(op==='Tj') {if(!textMode||operands.length!==1||operands[0].type!=='string')fail('UNSUPPORTED_PDF','Only simple ASCII Tj text is supported.');if(textShownSincePositioning)fail('UNSUPPORTED_PDF','Consecutive Tj text requires glyph-advance metrics, which are unsupported.');items.push({type:'text',text:operands[0].value,position:[...textPos],fontSize});textShownSincePositioning=true;}
     else if(op==='q'||op==='Q'||op==='cm'||op==='W'||op==='W*'||op==='Do'||op==='gs'||op==='sh'||op==='BI'||op==='ID'||op==='EI'||op==='TJ'||op==='T*'||op==='\''||op==='"') fail('UNSUPPORTED_PDF',`PDF operator ${op} is unsupported.`);
     else if(['w','J','j','M','G','g','RG','rg','K','k','d'].includes(op)) fail('UNSUPPORTED_PDF',`PDF graphics style operator ${op} is unsupported.`);
     else fail('UNSUPPORTED_PDF',`PDF content operator ${op} is unsupported.`);

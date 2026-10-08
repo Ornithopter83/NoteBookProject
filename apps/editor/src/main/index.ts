@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
 import { openPsd, type LayerChanges, type PsdLayerView } from '@northstar/psd-bridge'
+import { analyzeAi, inspectAi } from '@northstar/ai-bridge'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
@@ -11,6 +12,7 @@ const isDev = Boolean(rendererUrl)
 const rendererHtml = path.resolve(here, '../renderer/index.html')
 const preloadPath = path.resolve(here, '../preload/index.js')
 let activeDocumentPath: string | undefined
+let activeAiSourcePath: string | undefined
 const psdSessions = new Map<string, ReturnType<typeof openPsd>>()
 
 function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
@@ -62,8 +64,22 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
     ? { filePath: activeDocumentPath ?? smokePath!, canceled: false }
     : await dialog.showSaveDialog({ title: '문서 저장', defaultPath: 'Untitled.nbdoc', filters: [{ name: 'Northstar 문서', extensions: ['nbdoc'] }] })
   if (result.canceled || !result.filePath) return null
+  const savePath = path.resolve(result.filePath)
+  if (path.extname(savePath).toLowerCase() !== '.nbdoc') throw new Error('변환 문서는 .nbdoc 파일로만 저장할 수 있습니다.')
+  if (activeAiSourcePath) {
+    let destinationPath: string
+    try {
+      destinationPath = await realpath(savePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      destinationPath = path.join(await realpath(path.dirname(savePath)), path.basename(savePath))
+    }
+    if (destinationPath.toLowerCase() === activeAiSourcePath.toLowerCase()) {
+      throw new Error('원본 AI 파일은 덮어쓸 수 없습니다. .nbdoc 경로를 선택해 주세요.')
+    }
+  }
   const document = validateDocument(structuredClone(payload.document))
-  const assetDir = path.join(path.dirname(result.filePath), `${path.basename(result.filePath, '.nbdoc')}.assets`)
+  const assetDir = path.join(path.dirname(savePath), `${path.basename(savePath, '.nbdoc')}.assets`)
   for (const node of document.nodes) {
     if (node.kind !== 'image' || !node.src?.startsWith('data:image/')) continue
     const match = /^data:image\/(png|jpeg|webp|gif);base64,([\s\S]+)$/.exec(node.src)
@@ -75,19 +91,42 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
     node.resourcePath = `${path.basename(assetDir)}/${fileName}`
     delete node.src
   }
-  document.name = path.basename(result.filePath, '.nbdoc')
-  await writeFile(result.filePath, JSON.stringify(document, null, 2), 'utf8')
-  activeDocumentPath = result.filePath
-  return { filePath: result.filePath, document }
+  document.name = path.basename(savePath, '.nbdoc')
+  await writeFile(savePath, JSON.stringify(document, null, 2), 'utf8')
+  activeDocumentPath = savePath
+  return { filePath: savePath, document }
 })
 
 ipcMain.handle('document:open', async () => {
-  let filePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env.NORTHSTAR_GUI_SMOKE_FILE : undefined
+  let filePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? (activeDocumentPath ?? process.env.NORTHSTAR_GUI_SMOKE_AI_FILE ?? process.env.NORTHSTAR_GUI_SMOKE_FILE) : undefined
   if (!filePath) {
-    const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: '지원 문서', extensions: ['nbdoc', 'psd'] }, { name: 'Photoshop 문서', extensions: ['psd'] }, { name: 'Northstar 문서', extensions: ['nbdoc'] }] }
+    const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: '지원 문서', extensions: ['nbdoc', 'psd', 'ai'] }, { name: 'Illustrator 문서', extensions: ['ai'] }, { name: 'Photoshop 문서', extensions: ['psd'] }, { name: 'Northstar 문서', extensions: ['nbdoc'] }] }
     const result = await dialog.showOpenDialog(options)
     if (result.canceled || !result.filePaths[0]) return null
     filePath = result.filePaths[0]
+  }
+  if (path.extname(filePath).toLowerCase() === '.ai') {
+    const sourcePath = await realpath(filePath)
+    const bytes = await readFile(sourcePath)
+    const report = inspectAi(bytes)
+    if (!report.compatible || report.status !== 'pdf-compatible-ai') throw new Error(report.reason ?? 'PDF 호환 Illustrator AI 파일이 아닙니다.')
+    if (report.pages !== 1) throw new Error('한 페이지 PDF 호환 AI 파일만 가져올 수 있습니다.')
+    const source = analyzeAi(bytes)
+    const page = source.pages[0]
+    const nodes = page.items.map((item, index) => {
+      if (item.type === 'path') {
+        const points = item.segments.flatMap((segment) => segment.points)
+        const xs = points.map((point) => point[0]); const ys = points.map((point) => point[1])
+        const x = xs.length ? Math.min(...xs) : 0; const y = ys.length ? Math.min(...ys) : 0
+        return { id: `ai-path-${index + 1}`, name: `AI 경로 ${index + 1}`, kind: 'path' as const, x, y, width: Math.max(1, (xs.length ? Math.max(...xs) - x : 0)), height: Math.max(1, (ys.length ? Math.max(...ys) - y : 0)), fill: '#000000', opacity: 100, rotation: 0, visible: true, locked: false, pathSegments: item.segments, pathPaint: item.paint }
+      }
+      const [x, y] = item.position
+      return { id: `ai-text-${index + 1}`, name: `AI 텍스트 ${index + 1}`, kind: 'aiText' as const, x, y, width: Math.max(1, item.text.length * item.fontSize * 0.6), height: Math.max(1, item.fontSize), fill: '#000000', opacity: 100, rotation: 0, visible: true, locked: false, text: item.text, fontSize: item.fontSize }
+    })
+    const document = validateDocument({ format: 'northstar-document', version: 1, name: path.basename(filePath, '.ai'), width: page.width, height: page.height, background: '#ffffff', nodes })
+    activeDocumentPath = undefined
+    activeAiSourcePath = sourcePath
+    return { filePath, document, aiImport: { pdfVersion: source.pdfVersion, sourceName: path.basename(filePath), limitations: 'Illustrator 전용 데이터는 읽거나 보존하지 않습니다. 변환 문서는 .nbdoc로만 저장됩니다.' } }
   }
   if (path.extname(filePath).toLowerCase() === '.psd') {
     const psd = openPsd(await readFile(filePath))
@@ -95,6 +134,7 @@ ipcMain.handle('document:open', async () => {
     psdSessions.clear()
     psdSessions.set(sessionId, psd)
     activeDocumentPath = filePath
+    activeAiSourcePath = undefined
     return { filePath, psd: { sessionId, name: path.basename(filePath, '.psd'), width: psd.width, height: psd.height, bitDepth: psd.bitDepth, layers: flattenPsdTree(psd.readTree()), warnings: psd.warnings } }
   }
   const document = validateDocument(JSON.parse(await readFile(filePath, 'utf8')))
@@ -114,6 +154,7 @@ ipcMain.handle('document:open', async () => {
     node.src = `data:${mime};base64,${bytes.toString('base64')}`
   }
   activeDocumentPath = filePath
+  activeAiSourcePath = undefined
   return { filePath, document }
 })
 

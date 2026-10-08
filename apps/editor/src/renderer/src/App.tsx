@@ -19,6 +19,7 @@ export default function App() {
   const [psd, setPsd] = useState<PsdEditorDocument | null>(null)
   const [psdEdits, setPsdEdits] = useState<Record<string, LayerChanges>>({})
   const [selectedPsdId, setSelectedPsdId] = useState<string | null>(null)
+  const [aiImport, setAiImport] = useState<{ pdfVersion: string; sourceName: string; limitations: string } | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ id: string; x: number; y: number; startX: number; startY: number; before: EditorDocument } | null>(null)
   const selected = document.nodes.find((node) => node.id === selectedId) ?? null
@@ -68,8 +69,9 @@ export default function App() {
         const result = await window.northstar.savePsd(psd.sessionId, edits)
         if (result) setMessage('PSD를 저장했습니다. 레이어 구조를 유지했습니다.')
       } else {
+        if (aiImport) setMessage('AI 변환 문서를 .nbdoc로 저장 중')
         const result = await window.northstar.saveDocument(document)
-        if (result) { setDocument({ ...document, name: result.document.name }); setMessage('모든 변경 사항이 저장되었습니다') }
+        if (result) { setDocument({ ...document, name: result.document.name }); setMessage(aiImport ? 'AI 변환 문서를 .nbdoc로 저장했습니다' : '모든 변경 사항이 저장되었습니다') }
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '저장에 실패했습니다') }
   }
@@ -78,8 +80,8 @@ export default function App() {
       const result = await window.northstar.openDocument()
       if (result) {
         setSelectedId(null); setSelectedPsdId(null); setHistory([]); setFuture([]); setPsdEdits({})
-        if (result.psd) { setPsd(result.psd); setDocument(createDocument()); setMessage(`PSD 열기 · ${result.psd.warnings.length}개 확인 사항`) }
-        else if (result.document) { setPsd(null); setDocument(result.document); setMessage('문서를 열었습니다') }
+        if (result.psd) { setAiImport(null); setPsd(result.psd); setDocument(createDocument()); setMessage(`PSD 열기 · ${result.psd.warnings.length}개 확인 사항`) }
+        else if (result.document) { setPsd(null); setAiImport(result.aiImport ?? null); setDocument(result.document); setMessage(result.aiImport ? `AI 가져오기 · PDF ${result.aiImport.pdfVersion}` : '문서를 열었습니다') }
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '문서를 열지 못했습니다') }
   }
@@ -102,7 +104,7 @@ export default function App() {
     return { x: (event.clientX - box.left) * document.width / box.width, y: (event.clientY - box.top) * document.height / box.height }
   }
   const onCanvasDown = (event: React.PointerEvent<SVGSVGElement>) => {
-    if ((event.target as SVGElement).dataset.node) return
+    if ((event.target as SVGElement).closest('[data-node]')) return
     const point = canvasPoint(event)
     if (tool !== 'select') { addNode(tool, point.x, point.y); return }
     setSelectedId(null)
@@ -119,7 +121,10 @@ export default function App() {
     const drag = dragRef.current
     if (!drag) return
     const point = canvasPoint(event)
-    setDocument((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === drag.id ? { ...node, x: Math.round(drag.startX + point.x - drag.x), y: Math.round(drag.startY + point.y - drag.y) } : node) }))
+    const dx = point.x - drag.x; const dy = point.y - drag.y
+    setDocument((current) => ({ ...current, nodes: current.nodes.map((node) => node.id !== drag.id ? node : node.kind === 'path'
+      ? { ...node, x: node.x + dx, y: node.y - dy, pathSegments: node.pathSegments?.map((segment) => ({ ...segment, points: segment.points.map(([x, y]) => [x + dx, y - dy]) })) }
+      : { ...node, x: Math.round(drag.startX + dx), y: Math.round(drag.startY + (node.kind === 'aiText' ? -dy : dy)) }) }))
   }
   const onNodeUp = () => {
     if (!dragRef.current) return
@@ -127,7 +132,14 @@ export default function App() {
   }
 
   const importImage = async () => { const src = await window.northstar.importImage(); if (src) addNode('image', undefined, undefined, src) }
-  const editDimension = (key: 'x' | 'y' | 'width' | 'height' | 'rotation', event: ChangeEvent<HTMLInputElement>) => { if (selected) updateNode(selected.id, { [key]: Number(event.target.value) }) }
+  const editDimension = (key: 'x' | 'y' | 'width' | 'height' | 'rotation', event: ChangeEvent<HTMLInputElement>) => {
+    if (!selected) return
+    const value = Number(event.target.value)
+    if (selected.kind === 'path' && (key === 'x' || key === 'y')) {
+      const delta = value - selected[key]
+      updateNode(selected.id, { [key]: value, pathSegments: selected.pathSegments?.map((segment) => ({ ...segment, points: segment.points.map(([x, y]) => [x + (key === 'x' ? delta : 0), y + (key === 'y' ? delta : 0)]) })) })
+    } else updateNode(selected.id, { [key]: value })
+  }
   const reorder = (id: string, direction: -1 | 1) => {
     const index = document.nodes.findIndex((node) => node.id === id); const nextIndex = Math.max(0, Math.min(document.nodes.length - 1, index + direction))
     if (index === nextIndex) return
@@ -148,15 +160,18 @@ export default function App() {
       </aside>
       <main className="stage-area">
         <div className="canvas-toolbar"><div className="canvas-tools"><button className={tool === 'select' ? 'mini-tool active' : 'mini-tool'} title="선택 도구" onClick={() => setTool('select')}><MousePointer2 size={15} /></button>{!psd && <><span className="mini-separator" /><button className="mini-tool" title="레이어 추가" onClick={() => addNode('rect')}><Square size={14} /></button><button className="mini-tool" title="텍스트 추가" onClick={() => addNode('text')}><Type size={15} /></button><button className="mini-tool" title="이미지 가져오기" onClick={() => void importImage()}><FileImage size={15} /></button></>}</div><div className="canvas-tools"><span className="canvas-dimensions">{psd?.width ?? document.width} × {psd?.height ?? document.height}</span><span className="mini-separator" /><button className="zoom-button" onClick={() => setZoom(Math.max(40, zoom - 10))}>−</button><span className="zoom-value">{zoom}%</span><button className="zoom-button" onClick={() => setZoom(Math.min(120, zoom + 10))}>+</button></div></div>
+        {aiImport ? <div className="ai-warning" role="status" data-testid="ai-import-warning"><strong>AI 가져오기 · 원본은 변경되지 않습니다</strong><span>{aiImport.sourceName}에서 PDF 호환 벡터와 ASCII 텍스트를 .nbdoc 문서로 변환했습니다. {aiImport.limitations} Illustrator 전용 글꼴 정보와 메타데이터는 보존되지 않으며 네이티브 AI 저장은 지원하지 않습니다.</span></div> : null}
         {psd?.warnings.length ? <details className="psd-warning-list"><summary>PSD 저장 전 확인할 {psd.warnings.length}개 항목</summary><ul>{psd.warnings.map((warning, index) => <li key={`${warning.layerId ?? 'document'}-${index}`}>{warning.message}</li>)}</ul></details> : null}
         <div className="canvas-workspace"><div className="ruler ruler-top"><span>0</span><span>240</span><span>480</span><span>720</span><span>960</span><span>1200</span><span>1440</span></div><div className="ruler ruler-left"><span>0</span><span>160</span><span>320</span><span>480</span><span>640</span><span>800</span><span>960</span></div>
-          <div className="canvas-frame" style={{ width: `${Math.round((psd?.width ?? document.width) * zoom / 100)}px`, height: `${Math.round((psd?.height ?? document.height) * zoom / 100)}px` }}>{psd ? <div className="psd-artboard" data-testid="psd-artboard">{renderPsdLayers(psd.layers, psd.width, psd.height, psdEdits, selectedPsdId, setSelectedPsdId)}</div> : <svg ref={svgRef} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} className="artboard" style={{ background: document.background }}>
+          <div className="canvas-frame" style={{ width: `${Math.round((psd?.width ?? document.width) * zoom / 100)}px`, height: `${Math.round((psd?.height ?? document.height) * zoom / 100)}px` }}>{psd ? <div className="psd-artboard" data-testid="psd-artboard">{renderPsdLayers(psd.layers, psd.width, psd.height, psdEdits, selectedPsdId, setSelectedPsdId)}</div> : <svg ref={svgRef} data-testid={aiImport ? 'ai-artboard' : 'editor-artboard'} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} className="artboard" style={{ background: document.background }}>
             {document.nodes.map((node) => node.visible && <g key={node.id} data-node="true" opacity={node.opacity / 100} transform={`rotate(${node.rotation} ${node.x + node.width / 2} ${node.y + node.height / 2})`} onPointerDown={(event) => onNodeDown(event, node)} onPointerMove={onNodeMove} onPointerUp={onNodeUp}>
               {node.kind === 'rect' && <rect x={node.x} y={node.y} width={node.width} height={node.height} rx="7" fill={node.fill} />}
               {node.kind === 'ellipse' && <ellipse cx={node.x + node.width / 2} cy={node.y + node.height / 2} rx={node.width / 2} ry={node.height / 2} fill={node.fill} />}
               {node.kind === 'text' && <text x={node.x} y={node.y + (node.fontSize ?? 40)} fontSize={node.fontSize ?? 40} fontWeight="600" fill={node.fill}>{node.text}</text>}
+              {node.kind === 'aiText' && <text x={node.x} y={document.height - node.y} fontSize={node.fontSize ?? 12} fontFamily="Arial, sans-serif" fill={node.fill}>{node.text}</text>}
+              {node.kind === 'path' && <path d={pathToSvg(node.pathSegments ?? [], document.height, ['s', 'b', 'b*'].includes(node.pathPaint ?? '') )} fill={['f', 'F', 'f*', 'B', 'B*', 'b', 'b*'].includes(node.pathPaint ?? '') ? node.fill : 'none'} fillRule={['f*', 'B*', 'b*'].includes(node.pathPaint ?? '') ? 'evenodd' : 'nonzero'} stroke={['S', 's', 'B', 'B*', 'b', 'b*'].includes(node.pathPaint ?? '') ? node.fill : 'none'} strokeWidth="1" strokeLinecap="butt" strokeLinejoin="miter" />}
               {node.kind === 'image' && node.src && <image href={node.src} x={node.x} y={node.y} width={node.width} height={node.height} preserveAspectRatio="xMidYMid slice" />}
-              {selectedId === node.id && <rect className="selection-outline" x={node.x - 2} y={node.y - 2} width={node.width + 4} height={node.height + 4} fill="none" stroke="#7277ff" strokeWidth={2} strokeDasharray="7 4" pointerEvents="none" />}
+              {selectedId === node.id && <rect className="selection-outline" x={node.x - 2} y={(node.kind === 'path' ? document.height - node.y - node.height : node.kind === 'aiText' ? document.height - node.y - node.height : node.y) - 2} width={node.width + 4} height={node.height + 4} fill="none" stroke="#7277ff" strokeWidth={2} strokeDasharray="7 4" pointerEvents="none" />}
             </g>)}
             {!document.nodes.length && <g pointerEvents="none"><text x="720" y="450" textAnchor="middle" fill="#8d8d91" fontSize="27" fontWeight="600">아이디어를 캔버스에 담아보세요</text><text x="720" y="488" textAnchor="middle" fill="#a5a5a8" fontSize="17">왼쪽 도구를 선택하고 캔버스를 클릭해 오브젝트를 추가하세요</text></g>}
           </svg>}</div>
@@ -176,9 +191,9 @@ export default function App() {
           </div> : selected ? <div className="property-content">
             <label className="field-label">이름</label><input className="text-input" value={selected.name} onChange={(event) => updateNode(selected.id, { name: event.target.value })} />
             <label className="field-label position-label">위치</label><div className="field-grid"><NumberField label="X" value={selected.x} onChange={(event) => editDimension('x', event)} /><NumberField label="Y" value={selected.y} onChange={(event) => editDimension('y', event)} /></div>
-            <label className="field-label position-label">크기</label><div className="field-grid"><NumberField label="W" value={selected.width} onChange={(event) => editDimension('width', event)} /><NumberField label="H" value={selected.height} onChange={(event) => editDimension('height', event)} /></div>
-            <div className="property-row rotation-row"><label>회전</label><div className="number-control"><input type="number" value={selected.rotation} onChange={(event) => editDimension('rotation', event)} /><span>°</span></div></div>
-            {selected.kind === 'text' && <><label className="field-label position-label">텍스트</label><textarea className="text-input text-area" value={selected.text ?? ''} onChange={(event) => updateNode(selected.id, { text: event.target.value })} /><div className="property-row"><label>크기</label><div className="number-control"><input type="number" value={selected.fontSize ?? 40} onChange={(event) => updateNode(selected.id, { fontSize: Number(event.target.value) })} /><span>px</span></div></div></>}
+            {selected.kind !== 'path' && <>{selected.kind !== 'aiText' && <><label className="field-label position-label">크기</label><div className="field-grid"><NumberField label="W" value={selected.width} onChange={(event) => editDimension('width', event)} /><NumberField label="H" value={selected.height} onChange={(event) => editDimension('height', event)} /></div></>}
+            <div className="property-row rotation-row"><label>회전</label><div className="number-control"><input type="number" value={selected.rotation} onChange={(event) => editDimension('rotation', event)} /><span>°</span></div></div></>}
+            {(selected.kind === 'text' || selected.kind === 'aiText') && <><label className="field-label position-label">텍스트</label><textarea className="text-input text-area" value={selected.text ?? ''} onChange={(event) => updateNode(selected.id, { text: event.target.value })} /><div className="property-row"><label>크기</label><div className="number-control"><input type="number" value={selected.fontSize ?? 40} onChange={(event) => updateNode(selected.id, { fontSize: Number(event.target.value) })} /><span>{selected.kind === 'aiText' ? 'pt' : 'px'}</span></div></div></>}
             {selected.kind !== 'image' && <><label className="field-label position-label">채우기</label><div className="color-control"><span className="color-preview" style={{ background: selected.fill }} /><input aria-label="색상 코드" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /><input aria-label="색상 선택" type="color" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /></div></>}
             <div className="property-row opacity-row"><label>불투명도</label><span className="opacity-number">{selected.opacity}%</span></div><input className="opacity-slider" type="range" min="0" max="100" value={selected.opacity} onChange={(event) => updateNode(selected.id, { opacity: Number(event.target.value) })} />
             <div className="swatches">{palettes.map((color) => <button key={color} className={`swatch ${selected.fill === color ? 'chosen' : ''}`} style={{ background: color }} title={color} onClick={() => updateNode(selected.id, { fill: color })} />)}</div>
@@ -191,8 +206,18 @@ export default function App() {
 }
 
 function ToolButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }) { return <button className={`tool-button ${active ? 'active' : ''}`} title={label} aria-label={label} onClick={onClick}>{children}</button> }
-function NodeIcon({ kind }: { kind: NodeKind }) { return kind === 'ellipse' ? <Circle size={15} /> : kind === 'text' ? <Type size={15} /> : kind === 'image' ? <FileImage size={15} /> : <Square size={15} /> }
+function NodeIcon({ kind }: { kind: NodeKind }) { return kind === 'ellipse' ? <Circle size={15} /> : kind === 'text' || kind === 'aiText' ? <Type size={15} /> : kind === 'image' ? <FileImage size={15} /> : <Square size={15} /> }
 function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (event: ChangeEvent<HTMLInputElement>) => void }) { return <label className="number-field"><span>{label}</span><input aria-label={label} type="number" value={Math.round(value)} onChange={onChange} /></label> }
+
+function pathToSvg(segments: NonNullable<EditorNode['pathSegments']>, height: number, closeForPaint: boolean): string {
+  const commands = segments.map((segment) => {
+    if (segment.op === 'Z') return 'Z'
+    const points = segment.points.map(([x, y]) => `${x} ${height - y}`).join(' ')
+    return `${segment.op} ${points}`
+  })
+  if (closeForPaint && commands.length) commands.push('Z')
+  return commands.join(' ')
+}
 
 function findPsdLayer(layers: PsdLayerView[], id: string | null): PsdLayerView | null {
   if (!id) return null

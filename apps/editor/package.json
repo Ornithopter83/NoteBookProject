@@ -12,9 +12,11 @@
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "smoke:gui": "node scripts/m1-gui-smoke.cjs",
-    "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs"
+    "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs",
+    "smoke:ai-gui": "node scripts/m2-ai-gui-smoke.cjs"
   },
   "dependencies": {
+    "@northstar/ai-bridge": "file:../../packages/ai-bridge",
     "@northstar/psd-bridge": "file:../../packages/psd-bridge",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

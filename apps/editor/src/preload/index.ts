@@ -13,7 +13,7 @@ export interface PsdEditorDocument {
 }
 
 contextBridge.exposeInMainWorld('northstar', {
-  openDocument: (): Promise<{ filePath: string; document?: EditorDocument; psd?: PsdEditorDocument } | null> => ipcRenderer.invoke('document:open'),
+  openDocument: (): Promise<{ filePath: string; document?: EditorDocument; psd?: PsdEditorDocument; aiImport?: { pdfVersion: string; sourceName: string; limitations: string } } | null> => ipcRenderer.invoke('document:open'),
   saveDocument: (document: EditorDocument): Promise<{ filePath: string; document: EditorDocument } | null> => ipcRenderer.invoke('document:save', { document }),
   importImage: (): Promise<string | null> => ipcRenderer.invoke('image:import'),
   savePsd: (sessionId: string, edits: Array<{ id: string; changes: LayerChanges }>): Promise<{ filePath: string } | null> => ipcRenderer.invoke('psd:save', { sessionId, edits })

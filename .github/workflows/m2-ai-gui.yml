@@ -1,0 +1,47 @@
+name: M2 AI Bridge Windows GUI validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-ai-gui:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate AI Bridge
+        working-directory: packages/ai-bridge
+        run: npm run check
+
+      - name: Install editor dependencies
+        working-directory: apps/editor
+        run: npm ci
+
+      - name: Build editor with AI Bridge
+        working-directory: apps/editor
+        run: npm run build
+
+      - name: Typecheck editor
+        working-directory: apps/editor
+        run: npm run typecheck
+
+      - name: Run actual-file AI open-edit-save-reopen GUI smoke
+        working-directory: apps/editor
+        run: npm run smoke:ai-gui
+
+      - name: Run PSD open-edit-save-reopen GUI smoke
+        working-directory: apps/editor
+        run: npm run smoke:psd-gui
+
+      - name: Run existing .nbdoc GUI smoke
+        working-directory: apps/editor
+        run: npm run smoke:gui
