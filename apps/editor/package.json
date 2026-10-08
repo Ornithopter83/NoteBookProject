@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "smoke:gui": "node scripts/m1-gui-smoke.cjs"
   },
