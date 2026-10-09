@@ -14,6 +14,12 @@ import { readFileWithinLimit } from './file-io'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
 const isDev = Boolean(rendererUrl)
+const smokeCdpPort = Number(process.env.NORTHSTAR_M9_CDP_PORT)
+if (process.env.NORTHSTAR_M9_BATCH_SMOKE === '1' && process.env.NORTHSTAR_GUI_SMOKE === '1' &&
+  Number.isInteger(smokeCdpPort) && smokeCdpPort >= 1024 && smokeCdpPort <= 65535) {
+  app.commandLine.appendSwitch('remote-debugging-port', String(smokeCdpPort))
+  app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
+}
 const rendererHtml = path.resolve(here, '../renderer/index.html')
 const preloadPath = path.resolve(here, '../preload/index.cjs')
 let activeDocumentPath: string | undefined

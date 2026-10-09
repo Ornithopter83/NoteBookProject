@@ -181,12 +181,15 @@ goto :failed
 :failed
 echo.
 echo Northstar 실행에 실패했습니다. 위 해결 방법을 확인하세요.
+if defined NORTHSTAR_M9_BATCH_SMOKE exit /b 1
 :failed_without_popd
+if defined NORTHSTAR_M9_BATCH_SMOKE exit /b 1
 pause
 exit /b 1
 
 :failed_with_rc
 echo.
 echo Northstar 실행이 종료 코드 %LAUNCH_RC%로 끝났습니다.
+if defined NORTHSTAR_M9_BATCH_SMOKE exit /b %LAUNCH_RC%
 pause
 exit /b %LAUNCH_RC%

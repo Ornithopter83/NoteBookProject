@@ -91,6 +91,10 @@ jobs:
         shell: pwsh
         run: .\apps\editor\scripts\m7-launch-e2e.ps1
 
+      - name: Run root source-build launcher GUI E2E and verify Illustrator AI menu
+        working-directory: apps/editor
+        run: node scripts/m9-batch-gui-smoke.cjs
+
       - name: Create unsigned x64 Windows ZIP package
         working-directory: apps/editor
         env:

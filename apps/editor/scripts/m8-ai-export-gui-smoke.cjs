@@ -80,7 +80,9 @@ async function main() {
     await cdp('Runtime.enable'); await cdp('Page.enable')
     await waitFor("document.querySelector('[data-testid=editor-artboard]')", 'editor canvas')
     await click("Array.from(document.querySelectorAll('button')).find((e) => e.innerText.includes('열기'))", 'open source fixture')
-    await waitFor("document.querySelector('[data-testid=editor-artboard]')?.getAttribute('viewBox') === '0 0 1440 960'", '1440x960 fixture')
+    await waitFor("document.querySelector('[data-testid=editor-artboard]')?.getAttribute('viewBox') === '0 0 1440 960' && document.querySelector('.document-tab')?.innerText.includes('사진 원본') && document.querySelector('.layer-name')?.innerText.includes('JPEG 사진') && document.querySelector('[data-node-id=photo] image')?.getAttribute('href')?.startsWith('data:image/jpeg;base64,')", 'photo document and JPEG node loaded')
+    const loadedJpeg = await evaluate("(async () => { const source = document.querySelector('[data-node-id=photo] image')?.getAttribute('href'); if (!source) return null; const image = new Image(); image.src = source; await image.decode(); return { width: image.naturalWidth, height: image.naturalHeight } })()")
+    assert.deepEqual(loadedJpeg, { width: 1, height: 1 }, 'JPEG node did not decode as the expected loaded photo fixture')
     const chooseExport = async (label) => {
       await click("Array.from(document.querySelectorAll('button')).find((e) => e.innerText.includes('내보내기'))", 'export menu')
       await click(`Array.from(document.querySelectorAll('[role=menuitem]')).find((e) => e.innerText.includes(${JSON.stringify(label)}))`, `${label} export`)
