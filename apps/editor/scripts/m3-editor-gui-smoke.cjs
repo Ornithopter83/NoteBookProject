@@ -18,6 +18,7 @@ let socket
 let nextId = 0
 const pending = new Map()
 const browserErrors = []
+const navigationEvents = []
 let draggedGroupPosition
 
 function log(message) {
@@ -105,6 +106,22 @@ async function waitFor(expression, description, timeoutMs = 10000) {
   throw new Error(`Timed out waiting for ${description}`)
 }
 
+async function waitForInitialDocument(timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  let lastError
+  while (Date.now() < deadline) {
+    try {
+      const document = await evaluate(`({ url: location.href, readyState: document.readyState })`)
+      if (document?.readyState === 'complete' && document.url.startsWith('file:') && new URL(document.url).pathname.endsWith('/index.html')) return document
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  const current = await evaluate(`({ url: location.href, readyState: document.readyState })`).catch(() => null)
+  throw new Error(`Timed out waiting for initial renderer document load; current=${JSON.stringify(current)}${lastError ? `; last CDP error=${lastError.message}` : ''}; navigation=${JSON.stringify(navigationEvents)}`)
+}
+
 async function click(expression, description) {
   const clicked = await evaluate(`(() => { const element = ${expression}; if (!element || element.disabled) return false; element.click(); return true })()`)
   assert.equal(clicked, true, `Could not click ${description}`)
@@ -164,9 +181,14 @@ async function main() {
   try {
     await withStage('React renderer mount', async () => {
       const target = await waitForTarget(port)
+      log(`Attached to renderer target ${target.url || '(URL not reported)'}`)
       await connectDebugger(target.webSocketDebuggerUrl)
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(event.data)
+        if (message.method === 'Page.frameNavigated') navigationEvents.push({ event: message.method, url: message.params.frame.url, mainFrame: !message.params.frame.parentId })
+        if (message.method === 'Page.loadEventFired') navigationEvents.push({ event: message.method })
+        if (message.method === 'Page.frameStoppedLoading') navigationEvents.push({ event: message.method, frameId: message.params.frameId })
+        if (message.method === 'Page.lifecycleEvent') navigationEvents.push({ event: message.method, name: message.params.name, frameId: message.params.frameId })
         if (message.method === 'Runtime.bindingCalled' && message.params.name === '__northstarSmokeConsoleError') browserErrors.push(message.params.payload)
         if (message.method === 'Runtime.exceptionThrown') browserErrors.push(message.params.exceptionDetails?.text || 'Uncaught renderer exception')
         if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error') browserErrors.push(message.params.entry.text)
@@ -175,10 +197,10 @@ async function main() {
       await cdp('Log.enable')
       await cdp('Runtime.addBinding', { name: '__northstarSmokeConsoleError' })
       await cdp('Page.enable')
-      await cdp('Page.addScriptToEvaluateOnNewDocument', {
-        source: `console.error = (...args) => window.__northstarSmokeConsoleError(args.map(String).join(' '))`
-      })
-      await cdp('Page.reload', { ignoreCache: true })
+      await cdp('Page.setLifecycleEventsEnabled', { enabled: true })
+      const document = await waitForInitialDocument()
+      log(`Initial renderer document loaded: ${document.url} (${document.readyState}); navigation=${JSON.stringify(navigationEvents)}`)
+      await evaluate(`console.error = (...args) => window.__northstarSmokeConsoleError(args.map(String).join(' '))`)
       await waitFor(`document.querySelector('.app-shell') && document.querySelector('.brand')?.innerText.includes('northstar')`, 'React app shell')
       const text = await evaluate(`document.querySelector('.app-shell').innerText`)
       assert.match(text, /레이어/)
@@ -320,6 +342,10 @@ async function main() {
     log('No renderer exceptions or console errors were reported')
   } catch (error) {
     log(`FAIL ${stage}: ${error.stack || error}`)
+    if (socket?.readyState === WebSocket.OPEN) {
+      const rendererState = await evaluate(`({ url: location.href, readyState: document.readyState, title: document.title, shell: Boolean(document.querySelector('.app-shell')) })`).catch((diagnosticError) => ({ error: diagnosticError.message }))
+      log(`Renderer diagnostics: ${JSON.stringify({ rendererState, navigationEvents, browserErrors })}`)
+    }
     if (fs.existsSync(logPath)) log(`Electron log follows:\n${fs.readFileSync(logPath, 'utf8')}`)
     throw error
   } finally {

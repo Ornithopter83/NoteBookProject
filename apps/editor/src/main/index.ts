@@ -224,8 +224,14 @@ function createWindow(): void {
   window.webContents.on('will-navigate', (event, target) => {
     if (!allowsRendererNavigation(target)) event.preventDefault()
   })
-  window.webContents.on('did-fail-load', (_event, code, description, url) => {
-    console.error(`[renderer] load failed (${code}) ${description}: ${url}`)
+  window.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame) console.info(`[renderer] main-frame navigation started (inPlace=${isInPlace}): ${url}`)
+  })
+  window.webContents.on('did-finish-load', () => {
+    console.info(`[renderer] main-frame load finished: ${window.webContents.getURL()}`)
+  })
+  window.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    console.error(`[renderer] load failed (code=${code}, mainFrame=${isMainFrame}) ${description}: ${url}`)
   })
   const load = isDev ? window.loadURL(rendererUrl!) : window.loadFile(rendererHtml)
   void load.catch((error: unknown) => console.error('[renderer] window load failed:', error))
