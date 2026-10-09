@@ -124,7 +124,12 @@ export default function App() {
       }
       if (format === 'ai') {
         const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
-        if (result) setMessage(`Illustrator AI를 저장했습니다 · ${safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')} · ${formatExportSize(result.bytes)}`)
+        if (result) {
+          const filename = safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')
+          setMessage(result.filePath.toLowerCase().endsWith('.svg')
+            ? `SVG를 내보냈습니다 · ${filename} · ${formatExportSize(result.bytes)}`
+            : `Illustrator AI를 저장했습니다 · ${filename} · ${formatExportSize(result.bytes)}`)
+        }
         return
       }
       const image = new Image()
@@ -147,7 +152,7 @@ export default function App() {
       }
     } catch (error) {
       const detail = error instanceof Error ? safeDisplayText(error.message, '내보내기에 실패했습니다') : '내보내기에 실패했습니다'
-      setMessage(format === 'ai' ? `${detail} SVG 내보내기 메뉴에서 벡터 파일로 저장할 수 있습니다.` : detail)
+      setMessage(format === 'ai' ? `Illustrator 자동 저장에 실패했습니다. .ai 파일은 저장되지 않았습니다. Illustrator 상태를 확인한 뒤 다시 시도하거나 SVG 내보내기를 선택하세요. (${detail})` : detail)
     }
   }
   const open = async () => {

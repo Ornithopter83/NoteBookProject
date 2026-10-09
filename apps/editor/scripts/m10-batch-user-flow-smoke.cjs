@@ -11,6 +11,7 @@ const launcher = path.join(repoRoot, 'RUN-NORTHSTAR.bat')
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-m10-batch-flow-'))
 const documentPath = path.join(temp, '한글 Northstar 벡터 확인.nbdoc')
 const svgPath = path.join(temp, '한글 Northstar 벡터 확인.svg')
+const aiSvgPath = path.join(temp, 'Illustrator 대체 내보내기.svg')
 const aiPath = path.join(temp, '한글 Northstar 벡터 확인.ai')
 const reportPath = process.env.NORTHSTAR_M10_BATCH_RESULT_FILE
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQImWNgYGD4z8DAwMDAxAADAAUAAf+X0h8AAAAASUVORK5CYII='
@@ -74,7 +75,8 @@ async function main() {
       cwd: repoRoot, windowsHide: true, windowsVerbatimArguments: true,
       env: { ...process.env, NORTHSTAR_M9_BATCH_SMOKE: '1', NORTHSTAR_M9_CDP_PORT: String(port), NORTHSTAR_GUI_SMOKE: '1',
         NORTHSTAR_GUI_SMOKE_FILE: documentPath, NORTHSTAR_GUI_SMOKE_OPEN_FILE: documentPath,
-        NORTHSTAR_GUI_SMOKE_EXPORT_SVG: svgPath, NORTHSTAR_GUI_SMOKE_EXPORT_AI: aiPath }
+        NORTHSTAR_GUI_SMOKE_EXPORT_SVG: svgPath, NORTHSTAR_GUI_SMOKE_EXPORT_AI: aiPath, NORTHSTAR_GUI_SMOKE_EXPORT_AI_SVG: aiSvgPath,
+        NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE: '1', NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK: 'cancel,svg' }
     })
     child.on('error', (error) => { launcherError = error })
     child.stdout.setEncoding('utf8').on('data', collectLauncherOutput)
@@ -105,6 +107,16 @@ async function main() {
         if (launcherError) throw launcherError
         if (child.exitCode !== null) throw new Error(`RUN-NORTHSTAR.bat exited during ${description}: ${child.exitCode}\n${launcherOutput}`)
         if (await evaluate(`Boolean(${expression})`)) return
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      throw new Error(`Timed out waiting for ${description}`)
+    }
+    const waitForFile = async (filePath, description, timeoutMs = 30000) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (launcherError) throw launcherError
+        if (child.exitCode !== null) throw new Error(`RUN-NORTHSTAR.bat exited during ${description}: ${child.exitCode}\n${launcherOutput}`)
+        if (fs.existsSync(filePath)) return
         await new Promise((resolve) => setTimeout(resolve, 150))
       }
       throw new Error(`Timed out waiting for ${description}`)
@@ -171,21 +183,32 @@ async function main() {
 
     const priorStatus = svgStatus
     await chooseExport('Illustrator AI')
-    await waitFor(`document.querySelector('.canvas-status')?.innerText !== ${JSON.stringify(priorStatus)}`, 'Illustrator save/reopen or missing-installation result', 140000)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(fs.existsSync(aiPath), false, 'Canceling the SVG alternative created an AI file')
+    assert.equal(fs.existsSync(aiSvgPath), false, 'Canceling the SVG alternative created a file')
+    assert.equal(await evaluate("document.querySelector('.canvas-status')?.innerText || ''"), priorStatus, 'Canceling the SVG alternative changed the success status')
+    await chooseExport('Illustrator AI')
+    await waitForFile(aiSvgPath, 'SVG alternative file creation', 30000)
+    await waitFor(`document.querySelector('.canvas-status')?.innerText.includes('SVG를 내보냈습니다') && document.querySelector('.canvas-status')?.innerText.includes(${JSON.stringify(path.basename(aiSvgPath))})`, 'SVG alternative success status for its own file', 30000)
     const aiStatus = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
     let illustrator
-    if (fs.existsSync(aiPath)) {
+    if (fs.existsSync(aiSvgPath)) {
+      const svgBytes = fs.readFileSync(aiSvgPath)
+      const svg = svgBytes.toString('utf8')
+      assert.ok(svgBytes.byteLength > 30, 'SVG alternative is empty')
+      assert.match(svg, /<svg[^>]*viewBox/)
+      assert.equal((svg.match(/<path\b/g) || []).length, totalPaths, 'SVG alternative did not include the vector paths')
+      assert.match(aiStatus, /SVG를 내보냈습니다/)
+      assert.doesNotMatch(aiStatus, /Illustrator AI를 저장했습니다/)
+      assert.equal(fs.existsSync(aiPath), false, 'A fake .ai file was created for the SVG alternative')
+      illustrator = `COM-unregistered: cancel created no file; SVG alternative verified (${svgBytes.byteLength} bytes); no .ai file created`
+    } else if (fs.existsSync(aiPath)) {
       const aiBytes = fs.readFileSync(aiPath)
       assert.ok(aiBytes.byteLength > 32)
       assert.equal(aiBytes.subarray(0, 5).toString('ascii'), '%PDF-')
       assert.match(aiStatus, /Illustrator AI를 저장했습니다/, 'Installed Illustrator branch did not confirm save and reopen')
       illustrator = `installed: saved and reopened ${aiBytes.byteLength}-byte AI file`
-    } else {
-      assert.match(aiStatus, /Illustrator가 설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다/, 'Missing Illustrator branch did not show guidance')
-      assert.match(aiStatus, /SVG\/PDF 내보내기/)
-      assert.equal(fs.existsSync(aiPath), false, 'Missing Illustrator branch created a fake AI file')
-      illustrator = 'not installed: SVG/PDF guidance shown and no AI file created'
-    }
+    } else throw new Error(`AI export did not produce a verified AI or SVG file: ${aiStatus}`)
     assert.ok(dialogs > 0, 'Illustrator export did not show its confirmation dialog')
     assert.equal(fs.readdirSync(temp).filter((name) => /\.tmp(?:\.ai)?$/.test(name)).length, 0, 'Illustrator staging file was left behind')
     const report = { launcher: 'RUN-NORTHSTAR.bat with no arguments; source build and GUI launch verified', document: 'Korean title retained; damaged metadata filtered', images: 'PNG and JPEG vectorized; both originals preserved byte-for-byte', persistence: 'saved and reopened with vector paths', svg: `verified ${svgBytes} bytes and ${totalPaths} path elements`, illustrator }

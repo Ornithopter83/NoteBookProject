@@ -30,8 +30,10 @@ const MAX_AI_BYTES = 64 * 1024 * 1024
 const MAX_PSD_BYTES = 512 * 1024 * 1024
 const MAX_NBDOC_BYTES = 64 * 1024 * 1024
 const ILLUSTRATOR_AUTOMATION_TIMEOUT_MS = 120_000
+const ILLUSTRATOR_PROBE_TIMEOUT_MS = 15_000
 let smokeOpenFiles: string[] | undefined
 let smokeOpenFileIndex = 0
+let smokeIllustratorFallbackIndex = 0
 
 function makeFlatPsd(width: number, height: number, rgba: Uint8Array): Buffer {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 30000 || height > 30000 || rgba.byteLength !== width * height * 4) throw new Error('PSD 픽셀 크기가 유효하지 않습니다.')
@@ -191,21 +193,41 @@ async function saveNativeIllustratorFile(svg: string, destination: string): Prom
     const detail = error instanceof Error ? error.message : String(error)
     if (detail.startsWith('EXPORT_DESTINATION_EXISTS:')) throw new Error(detail.slice('EXPORT_DESTINATION_EXISTS:'.length))
     if (detail.includes('NO_ILLUSTRATOR:')) {
-      throw new Error(`Adobe Illustrator가 설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다. .ai 파일은 생성되지 않았습니다. Illustrator 설치 상태를 확인하거나 SVG/PDF 내보내기를 사용하세요. (${detail})`)
+      throw new Error('Illustrator 자동화를 사용할 수 없어 .ai 파일을 저장하지 못했습니다. SVG 또는 PDF로 내보내 주세요.')
     }
     if (detail.includes('AUTOMATION_HOST_UNAVAILABLE:')) {
-      throw new Error(`Illustrator 자동화를 시작하지 못했습니다. Windows PowerShell과 Adobe Illustrator 설치 상태를 확인하세요. .ai 파일은 생성되지 않았습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+      throw new Error('Illustrator 자동화를 시작하지 못해 .ai 파일을 저장하지 못했습니다. 설치 상태를 확인하거나 SVG 또는 PDF로 내보내 주세요.')
     }
     if (detail.includes('ILLUSTRATOR_TIMEOUT:')) {
-      throw new Error(`Illustrator 자동화가 시간 초과되어 .ai 파일을 저장하지 않았습니다. Illustrator가 응답하는지 확인한 뒤 다시 시도하거나 SVG/PDF 내보내기를 사용하세요. (${detail})`)
+      throw new Error('Illustrator 자동화 시간이 초과되어 .ai 파일을 저장하지 못했습니다. Illustrator가 응답하는지 확인한 뒤 다시 시도하거나 SVG 또는 PDF로 내보내 주세요.')
     }
     if (detail.includes('ILLUSTRATOR_CANCELLED:')) {
-      throw new Error(`Illustrator 내보내기가 취소되어 .ai 파일을 저장하지 않았습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+      throw new Error('Illustrator 내보내기가 취소되어 .ai 파일을 저장하지 않았습니다. SVG 또는 PDF로 내보낼 수 있습니다.')
     }
-    throw new Error(`Adobe Illustrator가 SVG를 네이티브 .ai로 저장하거나 다시 열지 못했습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+    throw new Error('Illustrator가 파일을 .ai로 저장하거나 다시 열지 못했습니다. 기존 파일은 보호했으며 .ai 파일을 저장하지 않았습니다. SVG 또는 PDF로 내보내 주세요.')
   } finally {
     await Promise.all([rm(tempDir, { recursive: true, force: true }), rm(stagedAi, { force: true })])
   }
+}
+
+async function canAutomateIllustrator(): Promise<boolean> {
+  if (process.env.NORTHSTAR_GUI_SMOKE === '1' && process.env.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE === '1') return false
+  if (process.platform !== 'win32') return false
+  const script = "$ErrorActionPreference = 'Stop'; try { $app = New-Object -ComObject Illustrator.Application; if (-not $app) { exit 1 }; [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app); exit 0 } catch { exit 1 }"
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (available: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      resolve(available)
+    }
+    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore' })
+    const timeout = setTimeout(() => { child.kill(); finish(false) }, ILLUSTRATOR_PROBE_TIMEOUT_MS)
+    child.once('error', () => finish(false))
+    child.once('close', (code) => finish(code === 0))
+  })
 }
 
 function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
@@ -444,11 +466,37 @@ ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpe
     png: { extension: 'png', label: 'PNG 이미지' }, jpeg: { extension: 'jpg', label: 'JPEG 이미지' },
     svg: { extension: 'svg', label: 'SVG 벡터' }, pdf: { extension: 'pdf', label: 'PDF 문서' }, psd: { extension: 'psd', label: '평면 Photoshop 문서' }, ai: { extension: 'ai', label: 'Illustrator AI' }
   } as const
-  const spec = formats[payload?.format]
+  let format = payload?.format
+  let spec = formats[format]
   if (!spec) throw new Error('지원하지 않는 내보내기 형식입니다.')
+  if (format === 'ai') {
+    const available = await canAutomateIllustrator()
+    if (!available) {
+      let chooseSvg: boolean
+      if (process.env.NORTHSTAR_GUI_SMOKE === '1' && process.env.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE === '1') {
+        const choices = (process.env.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK ?? 'cancel').split(',')
+        const choice = choices[Math.min(smokeIllustratorFallbackIndex++, choices.length - 1)]
+        chooseSvg = choice === 'svg'
+      } else {
+        const choice = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: ['SVG로 내보내기', '취소'],
+          defaultId: 0,
+          cancelId: 1,
+          message: 'Illustrator 자동화를 사용할 수 없습니다.',
+          detail: 'Illustrator.Application COM 등록이 없거나 자동화 시작에 실패했습니다. .ai 파일은 저장되지 않습니다. SVG로 내보내시겠습니까?'
+        })
+        chooseSvg = choice.response === 0
+      }
+      if (!chooseSvg) return null
+      format = 'svg'
+      spec = formats.svg
+    }
+  }
   const sourcePath = activePsdSourcePath ?? activeAiSourcePath ?? activeDocumentPath
   const safeName = (typeof payload.name === 'string' ? payload.name : 'Untitled').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') || 'Untitled'
-  const smokePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env[`NORTHSTAR_GUI_SMOKE_EXPORT_${payload.format.toUpperCase()}`] : undefined
+  const smokeFormat = format === 'svg' && payload.format === 'ai' ? 'AI_SVG' : format.toUpperCase()
+  const smokePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env[`NORTHSTAR_GUI_SMOKE_EXPORT_${smokeFormat}`] ?? process.env[`NORTHSTAR_GUI_SMOKE_EXPORT_${format.toUpperCase()}`] : undefined
   const result = smokePath ? { canceled: false, filePath: smokePath } : await dialog.showSaveDialog({
     title: `${spec.label} 내보내기`, defaultPath: `${safeName}.${spec.extension}`,
     filters: [{ name: spec.label, extensions: [spec.extension] }]
@@ -457,24 +505,31 @@ ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpe
   let destination = path.resolve(result.filePath)
   if (path.extname(destination).toLowerCase() !== `.${spec.extension}`) destination += `.${spec.extension}`
   if (sourcePath && await isSameFileOrPath(sourcePath, destination)) throw new Error('열어 둔 원본 파일은 덮어쓸 수 없습니다. 다른 경로로 내보내 주세요.')
-  if (payload.format === 'ai') {
+  if (format === 'ai') {
     if (typeof payload.svg !== 'string') throw new Error('Illustrator AI 저장용 SVG가 없습니다.')
     const bytes = await saveNativeIllustratorFile(payload.svg, destination)
     return { filePath: destination, bytes }
   }
   const width = payload.width; const height = payload.height
   let output: Buffer
-  if (payload.format === 'svg') {
+  if (format === 'svg') {
     if (typeof payload.svg !== 'string' || !payload.svg.trim().startsWith('<svg')) throw new Error('SVG 내보내기 데이터가 유효하지 않습니다.')
     output = Buffer.from(payload.svg, 'utf8')
-  } else if (payload.format === 'png' || payload.format === 'jpeg') {
+  } else if (format === 'png' || format === 'jpeg') {
     if (!(payload.image instanceof Uint8Array) || payload.image.byteLength < 8) throw new Error('이미지 데이터가 없습니다.')
     output = Buffer.from(payload.image)
   } else {
     if (!(payload.pixels instanceof Uint8Array)) throw new Error('픽셀 데이터가 없습니다.')
-    output = payload.format === 'psd' ? makeFlatPsd(width, height, payload.pixels) : makePdf(width, height, payload.pixels)
+    output = format === 'psd' ? makeFlatPsd(width, height, payload.pixels) : makePdf(width, height, payload.pixels)
   }
   const bytes = await persistExport(destination, output)
+  if (format === 'svg') {
+    const savedSvg = await readFile(destination)
+    const savedText = savedSvg.toString('utf8').trim()
+    if (savedSvg.byteLength !== output.byteLength || !savedSvg.equals(output) || !savedText.startsWith('<svg') || !savedText.endsWith('</svg>')) {
+      throw new Error('저장된 SVG 파일의 실제 내용 검증에 실패했습니다.')
+    }
+  }
   return { filePath: destination, bytes }
 })
 

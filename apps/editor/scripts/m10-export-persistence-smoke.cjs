@@ -9,7 +9,7 @@ const net = require('node:net')
 const appRoot = path.resolve(__dirname, '..')
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-m10-export-'))
 const input = path.join(root, '내보내기 확인.nbdoc')
-const output = { ai: path.join(root, '결과.ai'), svg: path.join(root, '결과.svg'), pdf: path.join(root, '결과.pdf') }
+const output = { ai: path.join(root, '결과.ai'), aiSvg: path.join(root, 'AI 대체.svg'), svg: path.join(root, '결과.svg'), pdf: path.join(root, '결과.pdf') }
 const reportPath = process.env.NORTHSTAR_M10_RESULT_FILE
 const source = {
   format: 'northstar-document', version: 1, name: '내보내기 확인', width: 320, height: 200,
@@ -49,7 +49,9 @@ async function main() {
   const child = spawn(require('electron'), [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox', appRoot], {
     cwd: appRoot, windowsHide: true,
     env: { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: input, NORTHSTAR_GUI_SMOKE_OPEN_FILE: input,
-      NORTHSTAR_GUI_SMOKE_EXPORT_AI: output.ai, NORTHSTAR_GUI_SMOKE_EXPORT_SVG: output.svg, NORTHSTAR_GUI_SMOKE_EXPORT_PDF: output.pdf }
+      NORTHSTAR_GUI_SMOKE_EXPORT_AI: output.ai, NORTHSTAR_GUI_SMOKE_EXPORT_AI_SVG: output.aiSvg,
+      NORTHSTAR_GUI_SMOKE_EXPORT_SVG: output.svg, NORTHSTAR_GUI_SMOKE_EXPORT_PDF: output.pdf,
+      NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE: '1', NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK: 'cancel,svg' }
   })
   let socket
   let id = 0
@@ -118,12 +120,18 @@ async function main() {
 
     const initialStatus = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
     await chooseExport('Illustrator AI')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(fs.existsSync(output.ai), false, 'Canceling the SVG alternative created an AI file')
+    assert.equal(fs.existsSync(output.aiSvg), false, 'Canceling the SVG alternative created a file')
+    assert.equal(await evaluate("document.querySelector('.canvas-status')?.innerText || ''"), initialStatus, 'Canceling the SVG alternative changed the success status')
+
+    await chooseExport('Illustrator AI')
     const timeout = Number(process.env.NORTHSTAR_M10_ILLUSTRATOR_TIMEOUT_MS) || 130000
     let status = ''
     const until = Date.now() + timeout
     while (Date.now() < until) {
       status = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
-      if (fs.existsSync(output.ai) || status !== initialStatus) break
+      if (status !== initialStatus) break
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
     if (fs.existsSync(output.ai)) {
@@ -133,10 +141,14 @@ async function main() {
       assert.ok(ai.lastIndexOf(Buffer.from('%%EOF')) >= 0, 'AI output has no PDF-compatible end marker')
       assert.match(status, /Illustrator AI를 저장했습니다/, 'Renderer did not confirm native save/reopen')
       results.illustrator = `passed: native Illustrator save, close, reopen, close; ${ai.byteLength} bytes`
-    } else if (/설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다/.test(status)) {
-      assert.match(status, /SVG\/PDF 내보내기/)
+    } else if (fs.existsSync(output.aiSvg)) {
+      const svg = fs.readFileSync(output.aiSvg, 'utf8')
+      assert.ok(Buffer.byteLength(svg, 'utf8') > 30, 'Fallback SVG file is empty')
+      assert.match(svg, /<svg[\s\S]*한글 내보내기/, 'Fallback SVG does not contain the expected artwork')
+      assert.match(status, /SVG를 내보냈습니다/, 'SVG alternative was not reported as an SVG export')
+      assert.doesNotMatch(status, /Illustrator AI를 저장했습니다/, 'SVG alternative was reported as an AI save')
       assert.equal(fs.existsSync(output.ai), false, 'A fake .ai file must never be created')
-      results.illustrator = 'not-installed: guidance shown and no .ai file created'
+      results.illustrator = `COM-unregistered: cancel created no file; SVG alternative verified (${Buffer.byteLength(svg, 'utf8')} bytes); no .ai file created`
     } else {
       throw new Error(`Illustrator branch did not produce a verified file or missing-installation result: ${status || '(no status)'}`)
     }
