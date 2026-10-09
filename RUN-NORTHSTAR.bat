@@ -10,11 +10,43 @@ set "PSD_BRIDGE=%ROOT%packages\psd-bridge"
 pushd "%ROOT%" >nul 2>&1
 if errorlevel 1 goto :root_error
 
-rem Prefer an already packaged application when one is present.
-if exist "%EDITOR%\release\" (
-  for /r "%EDITOR%\release" %%F in ("Northstar Editor.exe") do if not defined PACKAGED_EXE if exist "%%~fF" set "PACKAGED_EXE=%%~fF"
-)
-if defined PACKAGED_EXE goto :run_packaged
+rem The PowerShell helper validates PE headers, restores a missing extraction from
+rem the existing ZIP, and waits for the packaged GUI process to return.
+if not exist "%EDITOR%\scripts\m7-launch-check.ps1" goto :packaged_helper_missing
+where powershell.exe >nul 2>&1
+if errorlevel 1 goto :packaged_helper_missing
+set "PACKAGED_STATUS=%TEMP%\northstar-launch-%RANDOM%-%RANDOM%.status"
+if exist "%PACKAGED_STATUS%" del "%PACKAGED_STATUS%" >nul 2>&1
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%EDITOR%\scripts\m7-launch-check.ps1" -LaunchPackaged -StatusFile "%PACKAGED_STATUS%"
+set "PACKAGED_RC=%ERRORLEVEL%"
+findstr /x /c:"launched" "%PACKAGED_STATUS%" >nul 2>&1
+if not errorlevel 1 goto :packaged_process_result
+findstr /x /c:"fallback" "%PACKAGED_STATUS%" >nul 2>&1
+if not errorlevel 1 goto :packaged_fallback_ready
+goto :packaged_helper_error
+
+:packaged_process_result
+if "%PACKAGED_RC%"=="0" goto :packaged_success
+set "LAUNCH_RC=%PACKAGED_RC%"
+goto :packaged_launch_error
+
+:packaged_fallback_ready
+del "%PACKAGED_STATUS%" >nul 2>&1
+goto :developer_fallback
+
+:packaged_helper_error
+del "%PACKAGED_STATUS%" >nul 2>&1
+echo [오류] 패키지 검사 도구가 종료 코드 %PACKAGED_RC%로 끝나 실행 상태를 확인하지 못했습니다.
+echo [안내] 안전을 위해 개발 실행 경로의 요건을 확인합니다.
+goto :developer_fallback
+
+:packaged_helper_missing
+echo [안내] Windows PowerShell을 찾을 수 없어 패키지 상태를 검사하지 못했습니다.
+echo [안내] 개발 실행 요건을 확인합니다.
+goto :developer_fallback
+
+:developer_fallback
+echo [안내] 패키지 실행이 불가능하여 개발 실행 경로를 확인합니다.
 
 where node >nul 2>&1
 if errorlevel 1 goto :node_missing
@@ -73,12 +105,8 @@ popd
 if not "%LAUNCH_RC%"=="0" goto :launch_error
 exit /b 0
 
-:run_packaged
-echo 기존 패키지를 실행합니다: "%PACKAGED_EXE%"
-rem Wait for the GUI process so a launch/crash exit code is not discarded.
-start /wait "Northstar Editor" "%PACKAGED_EXE%"
-set "LAUNCH_RC=%ERRORLEVEL%"
-if not "%LAUNCH_RC%"=="0" goto :packaged_launch_error
+:packaged_success
+del "%PACKAGED_STATUS%" >nul 2>&1
 popd
 exit /b 0
 
@@ -124,12 +152,13 @@ goto :failed
 :launch_error
 echo [오류] Electron Editor 실행이 종료 코드 %LAUNCH_RC%로 끝났습니다.
 echo 해결: 위 npm 출력의 오류를 확인하고 앱 의존성 및 Windows 보안 정책을 점검하세요.
-goto :failed
+goto :failed_with_rc
 
 :packaged_launch_error
-echo [오류] 패키지 Editor가 종료 코드 %LAUNCH_RC%로 끝났습니다.
+if defined PACKAGED_STATUS del "%PACKAGED_STATUS%" >nul 2>&1
+echo [오류] 패키지 Editor가 시작된 뒤 종료 코드 %LAUNCH_RC%로 끝났습니다.
 echo 해결: 앱 실행 권한과 Windows 보안 정책을 확인하고 패키지를 다시 빌드하세요.
-goto :failed
+goto :failed_with_rc
 
 :psd_directory_error
 echo [오류] PSD Bridge 폴더를 열 수 없습니다: "%PSD_BRIDGE%"
@@ -147,3 +176,9 @@ echo Northstar 실행에 실패했습니다. 위 해결 방법을 확인하세�
 :failed_without_popd
 pause
 exit /b 1
+
+:failed_with_rc
+echo.
+echo Northstar 실행이 종료 코드 %LAUNCH_RC%로 끝났습니다.
+pause
+exit /b %LAUNCH_RC%

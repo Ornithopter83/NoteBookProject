@@ -65,6 +65,12 @@ jobs:
           if (-not $appExe) { throw 'Packaged Northstar Editor.exe is missing.' }
           $appAsar = Get-ChildItem -LiteralPath $extractRoot -Filter 'app.asar' -File -Recurse | Select-Object -First 1
           if (-not $appAsar) { throw 'Packaged app.asar is missing.' }
+          $repoRoot = (Resolve-Path (Join-Path $PWD '..\..')).Path
+          $launchCheck = Join-Path $repoRoot 'apps\editor\scripts\m7-launch-check.ps1'
+          & $launchCheck -ValidateExecutable $appExe.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted Northstar Editor.exe failed PE validation.' }
+          & $launchCheck -ValidatePackageDirectory $appExe.DirectoryName
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted Northstar Electron runtime package is incomplete.' }
           $packageBytes = (Get-Item -LiteralPath $archive.FullName).Length
           $expandedBytes = (Get-ChildItem -LiteralPath $extractRoot -File -Recurse | Measure-Object -Property Length -Sum).Sum
           "PACKAGED_EXE=$($appExe.FullName)" >> $env:GITHUB_OUTPUT

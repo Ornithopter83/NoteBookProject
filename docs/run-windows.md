@@ -2,9 +2,13 @@
 
 ## 편집기 실행
 
-프로젝트 루트의 `RUN-NORTHSTAR.bat`를 더블클릭하면 Northstar Editor가 실행됩니다. 경로는 배치 파일 위치를 기준으로 계산하므로 프로젝트 폴더에 공백이나 한글이 포함되어도 실행할 수 있습니다.
+프로젝트 루트의 `RUN-NORTHSTAR.bat`를 더블클릭하면 Northstar Editor가 실행됩니다. 바로가기를 만들 때는 `RUN-NORTHSTAR.bat` 자체를 대상으로 지정하세요. 바로가기의 대상 경로는 따옴표로 감싸고, 시작 위치는 프로젝트 루트로 지정하면 폴더 이름에 공백·한글·특수문자가 있어도 경로가 깨지지 않습니다. 저장소 안에서는 `.lnk` 바로가기를 제공하지 않습니다.
 
-`apps/editor/release`에 패키지된 `Northstar Editor.exe`가 있으면 그 파일을 먼저 실행합니다. 패키지가 없으면 Node.js 22.6 이상과 npm을 확인하고, 필요한 PSD Bridge 및 Editor 의존성을 설치한 다음 PSD Bridge와 Editor를 차례로 빌드해 Electron GUI를 엽니다. 준비나 실행 중 실패하면 창에 원인과 점검 방법을 표시하고 키 입력을 기다립니다.
+`apps/editor/release/win-unpacked/Northstar Editor.exe`와 Electron 런타임 파일, `resources/app.asar`가 모두 유효하면 그 패키지를 먼저 실행합니다. 실행 파일 이름에 공백이 있으므로 명령줄에서 직접 지정할 때는 전체 경로를 따옴표로 감싸야 합니다. `scripts/m7-launch-check.ps1`이 PE 헤더, Electron 런타임 파일, 패키지 구성, 실행 종료 코드를 확인합니다.
+
+실행 파일이 없거나 추출이 불완전하면 `apps/editor/release/Northstar-Editor-*-win-x64.zip` 중 가장 최근 ZIP을 검사합니다. ZIP 안의 절대 경로와 상위 폴더 이동 경로를 차단하고 임시 폴더에서 exe와 `resources/app.asar`를 확인한 다음에만 `win-unpacked`로 반영합니다. 사용할 수 있는 ZIP이 없거나 복구에 실패하면 Node.js 22.6 이상과 npm을 확인하고 PSD Bridge 및 Editor 의존성을 설치한 뒤 개발 GUI를 실행합니다. 누락 파일이나 실패 원인과 다음 점검 방법은 실행 창에 한글로 표시됩니다.
+
+`.github/workflows/m4-packaging-validation.yml`은 CI에서 ZIP을 별도 임시 폴더에 추출해 검사합니다. CI 패키징 성공은 로컬 `release/win-unpacked` 폴더의 존재를 뜻하지 않습니다. 로컬 파일 상태는 실행할 때마다 별도로 확인합니다.
 
 개발용 사전 요건은 [Node.js 다운로드](https://nodejs.org/)에서 설치할 수 있습니다. npm 설치, 빌드 또는 시작 문제는 배치 창의 안내에 따라 해당 단계에서 출력된 오류를 확인하세요.
 
