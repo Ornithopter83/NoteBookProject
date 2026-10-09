@@ -87,6 +87,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Run independent M11 native Illustrator warning and SVG save dialog check
+        id: m11_native_dialog
+        shell: pwsh
+        run: .\apps\editor\scripts\m11-native-dialog-gui-smoke.ps1
+
+      - name: Record M11 native dialog GUI check result
+        if: always()
+        shell: pwsh
+        env:
+          NATIVE_DIALOG_OUTCOME: ${{ steps.m11_native_dialog.outcome }}
+          NATIVE_DIALOG_RESULT: ${{ steps.m11_native_dialog.outputs.result }}
+        run: |
+          @"
+          ## M11 native Illustrator warning dialog GUI check
+
+          - Independent native UI automation outcome: **$env:NATIVE_DIALOG_OUTCOME** ($env:NATIVE_DIALOG_RESULT)
+          - If the script reports `UNVERIFIED`, the runner did not have a suitable interactive desktop or Illustrator COM was registered; the M8 synthetic export checks remain independent.
+          "@ | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
       - name: Run isolated M7 launch and recovery E2E
         shell: pwsh
         run: .\apps\editor\scripts\m7-launch-e2e.ps1

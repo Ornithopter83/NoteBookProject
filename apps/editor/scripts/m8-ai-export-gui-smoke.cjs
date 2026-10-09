@@ -70,13 +70,8 @@ async function main() {
   const port = await freePort()
   const electronEnv = { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: input, NORTHSTAR_GUI_SMOKE_OPEN_FILE: input,
     NORTHSTAR_GUI_SMOKE_EXPORT_AI: output.ai, NORTHSTAR_GUI_SMOKE_EXPORT_AI_SVG: output.aiSvg, NORTHSTAR_GUI_SMOKE_EXPORT_SVG: output.svg, NORTHSTAR_GUI_SMOKE_EXPORT_PDF: output.pdf }
-  if (!illustratorAvailable) {
-    electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE = '1'
-    electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK = 'cancel,svg'
-  } else {
-    delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE
-    delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK
-  }
+  delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE
+  delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK
   const child = spawn(require('electron'), [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox', appRoot], {
     cwd: appRoot, windowsHide: true,
     env: electronEnv
@@ -117,11 +112,10 @@ async function main() {
       await click("Array.from(document.querySelectorAll('button')).find((e) => e.innerText.includes('내보내기'))", 'export menu')
       await click(`Array.from(document.querySelectorAll('[role=menuitem]')).find((e) => e.innerText.includes(${JSON.stringify(label)}))`, `${label} export`)
     }
-    const initialStatus = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
-    const automationTempDirsBefore = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-')))
-    await chooseExport('Illustrator AI')
-    const { inspectAi } = await import('@northstar/ai-bridge')
     if (illustratorAvailable) {
+      const automationTempDirsBefore = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-')))
+      await chooseExport('Illustrator AI')
+      const { inspectAi } = await import('@northstar/ai-bridge')
       const status = await waitForFileAndStatus(output.ai, 'Illustrator AI를 저장했습니다', 'native AI save and reopen', ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS)
       const bytes = fs.readFileSync(output.ai); const report = inspectAi(bytes)
       assert.equal(report.status, 'pdf-compatible-ai', 'Output is not PDF-compatible native Illustrator AI')
@@ -130,24 +124,12 @@ async function main() {
       assert.match(status, /Illustrator AI를 저장했습니다/)
       results.illustrator = 'passed: native AI saveAs, close, reopen, and close verified by Illustrator automation'
       log('RESULT illustrator=PASS native .ai saved with PDF compatibility and reopened by Illustrator automation')
+      const newAutomationTempDirs = fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-') && !automationTempDirsBefore.has(name))
+      assert.deepEqual(newAutomationTempDirs, [], 'Illustrator automation temporary directory was left behind')
     } else {
-      await new Promise((resolve) => setTimeout(resolve, 500))
-      assert.equal(fs.existsSync(output.ai), false, 'Canceling the SVG alternative created a fake AI file')
-      assert.equal(fs.existsSync(output.aiSvg), false, 'Canceling the SVG alternative created a file')
-      assert.equal(await evaluate("document.querySelector('.canvas-status')?.innerText || ''"), initialStatus, 'Canceling the SVG alternative changed the success status')
-      await chooseExport('Illustrator AI')
-      const status = await waitForFileAndStatus(output.aiSvg, 'SVG를 내보냈습니다', 'SVG alternative and its success status')
-      const svg = fs.readFileSync(output.aiSvg, 'utf8')
-      assert.ok(Buffer.byteLength(svg, 'utf8') > 30, 'SVG alternative is empty')
-      assert.match(svg, /<svg\b/)
-      assert.match(svg, /data:image\/jpeg;base64,/)
-      assert.doesNotMatch(status, /Illustrator AI를 저장했습니다/, 'SVG alternative was reported as an AI save')
-      assert.equal(fs.existsSync(output.ai), false, 'A fake .ai file must never be created')
-      results.illustrator = 'not-installed: test-only cancel created no file or status; test-only SVG alternative created a real file and matching success status; no fake AI created'
-      log(`RESULT illustrator=NOT_INSTALLED test-only cancel and SVG alternative passed (${Buffer.byteLength(svg, 'utf8')} bytes)`)
+      results.illustrator = 'unverified: Illustrator COM is not registered; actual native warning-dialog Cancel/SVG selection is covered by the independent m11-native-dialog-gui-smoke.ps1 check'
+      log('RESULT illustrator=UNVERIFIED COM is not registered; no test-only choice override was used; see independent M11 native-dialog GUI check')
     }
-    const newAutomationTempDirs = fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-') && !automationTempDirsBefore.has(name))
-    assert.deepEqual(newAutomationTempDirs, [], 'Illustrator automation temporary directory was left behind')
     await chooseExport('Illustrator용 SVG')
     await waitForFileAndStatus(output.svg, 'SVG를 내보냈습니다', 'explicit SVG export')
     const svg = fs.readFileSync(output.svg, 'utf8')
