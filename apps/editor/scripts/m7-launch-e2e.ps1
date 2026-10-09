@@ -85,11 +85,11 @@ function Invoke-Helper {
 }
 
 function Invoke-Batch {
-  param([string]$Root)
+  param([string]$Root, [string]$Arguments = '')
   $batch = Join-Path $Root 'RUN-NORTHSTAR.bat'
   $info = New-Object System.Diagnostics.ProcessStartInfo
   $info.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
-  $info.Arguments = '/d /c ""' + $batch + '""'
+  $info.Arguments = '/d /c ""' + $batch + '" ' + $Arguments + '"'
   $info.WorkingDirectory = $Root
   $info.UseShellExecute = $false
   $info.CreateNoWindow = $true
@@ -177,7 +177,7 @@ public static class NorthstarE2EGui {
   Assert-True ($correctLinkRead.TargetPath -eq (Join-Path $batchRoot 'RUN-NORTHSTAR.bat') -and (Test-Path -LiteralPath $correctLinkRead.TargetPath)) '올바른 바로가기가 공백 경로의 실제 배치 파일을 대상으로 지정'
   $env:NORTHSTAR_E2E_GUI_MARKER = Join-Path $batchRoot 'gui.started'
   $env:NORTHSTAR_E2E_GUI_EXIT = '0'
-  $launchResult = Invoke-Batch -Root $batchRoot
+  $launchResult = Invoke-Batch -Root $batchRoot -Arguments '/package'
   Assert-True ($launchResult.ExitCode -eq 0 -and (Test-Path -LiteralPath $env:NORTHSTAR_E2E_GUI_MARKER)) '공백 경로의 실제 배치 파일이 GUI를 실행하고 정상 종료'
 
   $exitRoot = New-FixtureRoot 'exit code propagation'
@@ -185,7 +185,7 @@ public static class NorthstarE2EGui {
   New-PackageDirectory -Directory $exitPackage -Executable $fixtureExe -Complete
   $env:NORTHSTAR_E2E_GUI_MARKER = Join-Path $exitRoot 'gui.started'
   $env:NORTHSTAR_E2E_GUI_EXIT = '23'
-  $batchResult = Invoke-Batch -Root $exitRoot
+  $batchResult = Invoke-Batch -Root $exitRoot -Arguments '/package'
   Assert-True ($batchResult.ExitCode -eq 23 -and (Test-Path -LiteralPath $env:NORTHSTAR_E2E_GUI_MARKER)) '실제 배치 파일이 GUI 종료 코드 23을 호출자에게 전달'
 
   $zipRoot = New-FixtureRoot 'zip restoration'
@@ -224,18 +224,55 @@ public static class NorthstarE2EGui {
   $rollbackResult = Invoke-Helper -Root $rollbackRoot -ExtraArguments @('-TestFailAfterBackup')
   Assert-True ($rollbackResult.ExitCode -eq 2 -and $rollbackResult.Status -eq 'fallback' -and (Test-Path -LiteralPath $oldMarker) -and (Get-Content -LiteralPath $oldMarker -Encoding UTF8 -Raw) -eq 'preserve-me') 'ZIP 반영 실패 시 기존 패키지를 rollback으로 보존'
 
-  $fallbackRoot = New-FixtureRoot 'development fallback'
+  $fallbackRoot = New-FixtureRoot 'source preferred with old package'
+  $oldPackage = Join-Path $fallbackRoot 'apps\editor\release\win-unpacked'
+  New-PackageDirectory -Directory $oldPackage -Executable $fixtureExe -Complete
   $stubBin = Join-Path $fallbackRoot 'command stubs'
   [void](New-Item -ItemType Directory -Path $stubBin -Force)
   $stubBatch = '@echo off' + [Environment]::NewLine + 'exit /b 0' + [Environment]::NewLine
   [System.IO.File]::WriteAllText((Join-Path $stubBin 'node.bat'), $stubBatch, (New-Object System.Text.UTF8Encoding($false)))
-  [System.IO.File]::WriteAllText((Join-Path $stubBin 'npm.bat'), $stubBatch, (New-Object System.Text.UTF8Encoding($false)))
+$npmStub = @'
+@echo off
+if /i "%~1"=="--prefix" if /i "%~3"=="run" if /i "%~4"=="build" exit /b %NORTHSTAR_E2E_NPM_BUILD_EXIT%
+if /i "%~1"=="run" if /i "%~2"=="build" exit /b %NORTHSTAR_E2E_NPM_BUILD_EXIT%
+if /i "%~1"=="run" if /i "%~2"=="preview" echo source>"%NORTHSTAR_E2E_SOURCE_MARKER%"
+exit /b 0
+'@
+  [System.IO.File]::WriteAllText((Join-Path $stubBin 'npm.bat'), $npmStub, (New-Object System.Text.UTF8Encoding($false)))
   $oldPath = $env:PATH
+  $env:NORTHSTAR_E2E_SOURCE_MARKER = Join-Path $fallbackRoot 'source.started'
+  $env:NORTHSTAR_E2E_GUI_MARKER = Join-Path $fallbackRoot 'old-package.started'
+  $env:NORTHSTAR_E2E_GUI_EXIT = '0'
+  $env:NORTHSTAR_E2E_NPM_BUILD_EXIT = '0'
   $env:PATH = [string]::Concat($stubBin, [char]59, $oldPath)
   try { $fallbackBatch = Invoke-Batch -Root $fallbackRoot } finally { $env:PATH = $oldPath }
-  if ($fallbackBatch.ExitCode -ne 0) { throw "Development fallback E2E failed." }
-  $passed++
-  Write-Host '[통과] 패키지 실행 불가 시 개발 실행으로 전환'
+  if ($fallbackBatch.ExitCode -ne 0) { throw ("Source launch E2E failed with exit code {0}. stdout: {1} stderr: {2}" -f $fallbackBatch.ExitCode, $fallbackBatch.Output, $fallbackBatch.Error) }
+  Assert-True ((Test-Path -LiteralPath $env:NORTHSTAR_E2E_SOURCE_MARKER) -and -not (Test-Path -LiteralPath $env:NORTHSTAR_E2E_GUI_MARKER)) '구버전 패키지가 있어도 기본 배치 실행은 현재 소스 빌드·GUI 경로를 선택'
+
+  Remove-Item -LiteralPath $env:NORTHSTAR_E2E_SOURCE_MARKER, $env:NORTHSTAR_E2E_GUI_MARKER -Force -ErrorAction SilentlyContinue
+  $env:NORTHSTAR_E2E_NPM_BUILD_EXIT = '17'
+  $env:PATH = [string]::Concat($stubBin, [char]59, $oldPath)
+  try { $buildFailureBatch = Invoke-Batch -Root $fallbackRoot } finally { $env:PATH = $oldPath }
+  Assert-True ($buildFailureBatch.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $env:NORTHSTAR_E2E_SOURCE_MARKER) -and -not (Test-Path -LiteralPath $env:NORTHSTAR_E2E_GUI_MARKER)) '소스 빌드 실패 시 구버전 패키지로 자동 전환하지 않고 종료'
+  Write-Host '[통과] /package 지정 시에만 기존 패키지 실행'
+
+  $systemPath = [string]::Concat((Join-Path $env:WINDIR 'System32'), [char]59, $env:WINDIR)
+  $nodeMissingRoot = New-FixtureRoot 'node missing'
+  $env:PATH = $systemPath
+  try { $nodeMissingResult = Invoke-Batch -Root $nodeMissingRoot } finally { $env:PATH = $oldPath }
+  Assert-True ($nodeMissingResult.ExitCode -ne 0 -and $nodeMissingResult.Output.Contains('Node.js가 설치되어 있지 않거나 PATH에서 찾을 수 없습니다.')) 'Node.js가 없으면 오류를 표시하고 종료'
+
+  $npmMissingRoot = New-FixtureRoot 'npm missing'
+  $nodeOnlyBin = Join-Path $workRoot 'node only command stubs'
+  [void](New-Item -ItemType Directory -Path $nodeOnlyBin -Force)
+  [System.IO.File]::WriteAllText((Join-Path $nodeOnlyBin 'node.bat'), $stubBatch, (New-Object System.Text.UTF8Encoding($false)))
+  $env:PATH = [string]::Concat($nodeOnlyBin, [char]59, $systemPath)
+  try { $npmMissingResult = Invoke-Batch -Root $npmMissingRoot } finally { $env:PATH = $oldPath }
+  Assert-True ($npmMissingResult.ExitCode -ne 0 -and $npmMissingResult.Output.Contains('npm을 PATH에서 찾을 수 없습니다.')) 'npm이 없으면 오류를 표시하고 종료'
+
+  $usageRoot = New-FixtureRoot 'invalid arguments'
+  $usageResult = Invoke-Batch -Root $usageRoot -Arguments '/bogus-arg'
+  Assert-True ($usageResult.ExitCode -ne 0 -and $usageResult.Output.Contains('[사용법]') -and -not $usageResult.Error.Contains('is not recognized')) '잘못된 인수 안내를 한글로 표시하고 배치 파싱 오류 없이 종료'
 
   Write-Output $passed
 }
@@ -246,5 +283,7 @@ catch {
 finally {
   Remove-Item Env:NORTHSTAR_E2E_GUI_MARKER -ErrorAction SilentlyContinue
   Remove-Item Env:NORTHSTAR_E2E_GUI_EXIT -ErrorAction SilentlyContinue
+  Remove-Item Env:NORTHSTAR_E2E_SOURCE_MARKER -ErrorAction SilentlyContinue
+  Remove-Item Env:NORTHSTAR_E2E_NPM_BUILD_EXIT -ErrorAction SilentlyContinue
   if ($workRoot -and (Test-Path -LiteralPath $workRoot)) { Remove-Item -LiteralPath $workRoot -Recurse -Force }
 }

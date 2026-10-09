@@ -227,7 +227,7 @@ try {
 }
 catch {
   [Console]::Error.WriteLine("[오류] 패키지 확인·추출·실행에 실패했습니다: $($_.Exception.Message)")
-  [Console]::Error.WriteLine('[안내] 개발 실행 경로로 전환합니다. ZIP 손상 여부와 폴더 쓰기 권한을 확인하세요.')
+  [Console]::Error.WriteLine('[안내] 명시한 패키지 실행을 중단합니다. ZIP 손상 여부와 폴더 쓰기 권한을 확인하거나 인수 없이 배치 파일을 실행해 현재 소스를 빌드하세요.')
   Set-LaunchStatus -Status 'fallback'
   exit 2
 }

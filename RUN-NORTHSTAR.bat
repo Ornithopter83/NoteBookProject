@@ -10,6 +10,14 @@ set "PSD_BRIDGE=%ROOT%packages\psd-bridge"
 pushd "%ROOT%" >nul 2>&1
 if errorlevel 1 goto :root_error
 
+rem Source builds are the default so the UI always matches the checked-out source.
+rem Packaged builds are available only when explicitly requested with /package.
+if /i "%~1"=="/package" goto :launch_packaged
+if /i "%~1"=="--package" goto :launch_packaged
+if not "%~1"=="" goto :usage_error
+goto :developer_launch
+
+:launch_packaged
 rem The PowerShell helper validates PE headers, restores a missing extraction from
 rem the existing ZIP, and waits for the packaged GUI process to return.
 if not exist "%EDITOR%\scripts\m7-launch-check.ps1" goto :packaged_helper_missing
@@ -22,8 +30,6 @@ set "PACKAGED_RC=%ERRORLEVEL%"
 if "%PACKAGED_RC%"=="0" goto :packaged_success
 findstr /x /c:"launched" "%PACKAGED_STATUS%" >nul 2>&1
 if not errorlevel 1 goto :packaged_process_result
-findstr /x /c:"fallback" "%PACKAGED_STATUS%" >nul 2>&1
-if not errorlevel 1 goto :packaged_fallback_ready
 goto :packaged_helper_error
 
 :packaged_process_result
@@ -31,27 +37,23 @@ if "%PACKAGED_RC%"=="0" goto :packaged_success
 set "LAUNCH_RC=%PACKAGED_RC%"
 goto :packaged_launch_error
 
-:packaged_fallback_ready
-del "%PACKAGED_STATUS%" >nul 2>&1
-goto :developer_fallback
-
 :packaged_helper_error
 del "%PACKAGED_STATUS%" >nul 2>&1
 echo [오류] 패키지 검사 도구가 종료 코드 %PACKAGED_RC%로 끝나 실행 상태를 확인하지 못했습니다.
-echo [안내] 안전을 위해 개발 실행 경로의 요건을 확인합니다.
-goto :developer_fallback
+echo [안내] 패키지 복구를 확인하거나 인수 없이 다시 실행해 현재 소스를 빌드하세요.
+goto :failed
 
 :packaged_helper_missing
 echo [안내] Windows PowerShell을 찾을 수 없어 패키지 상태를 검사하지 못했습니다.
-echo [안내] 개발 실행 요건을 확인합니다.
-goto :developer_fallback
+echo [안내] Windows PowerShell을 설치하거나 인수 없이 실행해 현재 소스를 빌드하세요.
+goto :failed
 
-:developer_fallback
-echo [안내] 패키지 실행이 불가능하여 개발 실행 경로를 확인합니다.
+:developer_launch
+echo 현재 소스를 빌드한 뒤 Northstar Editor를 실행합니다...
 
 where node >nul 2>&1
 if errorlevel 1 goto :node_missing
-node -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit(major>22||(major===22&&minor>=6)?0:1)" >nul 2>&1
+call node -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit(major>22||(major===22&&minor>=6)?0:1)" >nul 2>&1
 if errorlevel 1 goto :node_old
 where npm >nul 2>&1
 if errorlevel 1 goto :npm_missing
@@ -115,6 +117,11 @@ exit /b 0
 echo [오류] 프로젝트 폴더를 열 수 없습니다.
 echo 해결: RUN-NORTHSTAR.bat를 프로젝트 루트에 두고 다시 실행하세요.
 goto :failed_without_popd
+
+:usage_error
+echo [사용법] RUN-NORTHSTAR.bat 또는 RUN-NORTHSTAR.bat /package
+echo 기본 실행은 현재 소스를 빌드합니다. /package는 기존 Electron 패키지를 명시적으로 실행합니다.
+goto :failed
 
 :node_missing
 echo [오류] Node.js가 설치되어 있지 않거나 PATH에서 찾을 수 없습니다.
