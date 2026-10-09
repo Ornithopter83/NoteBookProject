@@ -10,7 +10,7 @@ declare global {
       saveDocument(document: EditorDocument): Promise<{ filePath: string; document: EditorDocument } | null>
       importImage(): Promise<string | null>
       savePsd(sessionId: string, edits: Array<{ id: string; changes: LayerChanges }>): Promise<{ filePath: string } | null>
-      exportFile(payload: { format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd' | 'ai'; width: number; height: number; svg?: string; pixels?: Uint8Array; image?: Uint8Array; name: string }): Promise<{ filePath: string } | null>
+      exportFile(payload: { format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd' | 'ai'; width: number; height: number; svg?: string; pixels?: Uint8Array; image?: Uint8Array; name: string }): Promise<{ filePath: string; bytes: number } | null>
     }
   }
 }

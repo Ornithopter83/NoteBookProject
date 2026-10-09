@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { AlignLeft, ArrowDown, ArrowUp, ChevronDown, Circle, Download, Eye, EyeOff, FileImage, FilePlus2, Grid2X2, ImagePlus, Layers, LockKeyhole, MousePointer2, Redo2, Save, Square, Type, Undo2, X } from 'lucide-react'
-import { cloneDocument, createDocument, isValidPathSegments, type EditorDocument, type EditorNode, type NodeGroup, type NodeKind } from '../../shared/document'
+import { cloneDocument, createDocument, isSafeDocumentName, isValidPathSegments, safeDisplayText, type EditorDocument, type EditorNode, type NodeGroup, type NodeKind } from '../../shared/document'
 import type { PsdEditorDocument } from '../../preload'
 import type { LayerChanges, PsdLayerView } from '@northstar/psd-bridge'
+import { vectorizeImage, type VectorizedImage } from './vectorize'
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text'
 const palettes = ['#f97352', '#f7b955', '#b5ca74', '#62b7a6', '#6797d3', '#a18ad3', '#ed8ca2', '#252629']
@@ -25,6 +26,7 @@ export default function App() {
   const [psdEdits, setPsdEdits] = useState<Record<string, LayerChanges>>({})
   const [selectedPsdId, setSelectedPsdId] = useState<string | null>(null)
   const [aiImport, setAiImport] = useState<{ pdfVersion: string; sourceName: string; limitations: string } | null>(null)
+  const [vectorPreview, setVectorPreview] = useState<{ nodeId: string; result: VectorizedImage } | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ ids: string[]; groupId?: string; x: number; y: number; before: EditorDocument } | null>(null)
   const selected = document.nodes.find((node) => node.id === selectedId) ?? null
@@ -97,13 +99,13 @@ export default function App() {
       } else {
         if (aiImport) setMessage('AI 변환 문서를 .nbdoc로 저장 중')
         const result = await window.northstar.saveDocument(document)
-        if (result) { setDocument({ ...document, name: result.document.name }); setMessage(aiImport ? 'AI 변환 문서를 .nbdoc로 저장했습니다' : '모든 변경 사항이 저장되었습니다') }
+        if (result) { setDocument({ ...document, name: isSafeDocumentName(result.document.name) ? result.document.name.trim() : '가져온 문서' }); setMessage(aiImport ? 'AI 변환 문서를 .nbdoc로 저장했습니다' : '모든 변경 사항이 저장되었습니다') }
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '저장에 실패했습니다') }
   }
   const exportFile = async (format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd' | 'ai') => {
     setExportOpen(false)
-    if (format === 'ai' && !window.confirm('현재 캔버스를 Illustrator에서 열어 네이티브 .ai 파일로 저장합니다. 사진은 포함된 JPEG 래스터 이미지로 유지되며 벡터화되지 않습니다. 계속할까요?')) return
+    if (format === 'ai' && !window.confirm('Illustrator가 설치되어 있으면 변환된 벡터 경로를 포함해 .ai 저장을 시도합니다. 사용할 수 없으면 AI 파일 대신 SVG 저장을 안내합니다. 계속할까요?')) return
     if (format === 'psd') {
       const sourceWarnings = psd?.warnings.filter((warning) => !warning.message.startsWith('Layer edits do not regenerate the flattened composite preview.')) ?? []
       const warningDetails = sourceWarnings.length ? `\n\n원본 PSD 확인 사항:\n${sourceWarnings.slice(0, 4).map((warning) => `• ${warning.message}`).join('\n')}${sourceWarnings.length > 4 ? `\n• 외 ${sourceWarnings.length - 4}개 항목` : ''}` : ''
@@ -117,12 +119,12 @@ export default function App() {
       const svg = psd ? createPsdSvg(psd.layers, psd.width, psd.height, psdEdits) : createExportSvg(svgRef.current, document.width, document.height, document.background)
       if (format === 'svg') {
         const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
-        if (result) setMessage(`SVG를 내보냈습니다 · ${result.filePath}`)
+        if (result) setMessage(`SVG를 내보냈습니다 · ${safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')} · ${formatExportSize(result.bytes)}`)
         return
       }
       if (format === 'ai') {
         const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
-        if (result) setMessage(`Illustrator AI를 저장했습니다 · ${result.filePath}`)
+        if (result) setMessage(`Illustrator AI를 저장했습니다 · ${safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')} · ${formatExportSize(result.bytes)}`)
         return
       }
       const image = new Image()
@@ -137,13 +139,16 @@ export default function App() {
         const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error('이미지 인코딩에 실패했습니다.')), format === 'png' ? 'image/png' : 'image/jpeg', 0.92))
         const bytes = new Uint8Array(await blob.arrayBuffer())
         const result = await window.northstar.exportFile({ format, width, height, image: bytes, name: psd?.name ?? document.name })
-        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${result.filePath}`)
+        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')} · ${formatExportSize(result.bytes)}`)
       } else {
         const pixels = context.getImageData(0, 0, width, height).data
         const result = await window.northstar.exportFile({ format, width, height, pixels: new Uint8Array(pixels), name: psd?.name ?? document.name })
-        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${result.filePath}`)
+        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${safeDisplayText(result.filePath.split(/[\\/]/).pop(), '저장 완료')} · ${formatExportSize(result.bytes)}`)
       }
-    } catch (error) { setMessage(error instanceof Error ? error.message : '내보내기에 실패했습니다') }
+    } catch (error) {
+      const detail = error instanceof Error ? safeDisplayText(error.message, '내보내기에 실패했습니다') : '내보내기에 실패했습니다'
+      setMessage(format === 'ai' ? `${detail} SVG 내보내기 메뉴에서 벡터 파일로 저장할 수 있습니다.` : detail)
+    }
   }
   const open = async () => {
     try {
@@ -151,7 +156,12 @@ export default function App() {
       if (result) {
         setSelectedId(null); setSelectedIds([]); setSelectedGroupId(null); setSelectedPsdId(null); setHistory([]); setFuture([]); setPsdEdits({})
         if (result.psd) { setAiImport(null); setPsd(result.psd); setDocument(createDocument()); setMessage(`PSD 열기 · ${result.psd.warnings.length}개 확인 사항`) }
-        else if (result.document) { setPsd(null); setAiImport(result.aiImport ?? null); setDocument(result.document); setMessage(result.aiImport ? `AI 가져오기 · PDF ${result.aiImport.pdfVersion}` : '문서를 열었습니다') }
+        else if (result.document) {
+          const incoming = result.document
+          const safeName = isSafeDocumentName(incoming.name) ? incoming.name.trim() : '가져온 문서'
+          setPsd(null); setAiImport(result.aiImport ? { ...result.aiImport, sourceName: safeDisplayText(result.aiImport.sourceName, '가져온 AI 문서'), limitations: safeDisplayText(result.aiImport.limitations) } : null)
+          setDocument({ ...incoming, name: safeName }); setMessage(result.aiImport ? `AI 가져오기 · PDF ${safeDisplayText(result.aiImport.pdfVersion, '?')}` : '문서를 열었습니다')
+        }
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '문서를 열지 못했습니다') }
   }
@@ -241,6 +251,16 @@ export default function App() {
   }
 
   const importImage = async () => { const src = await window.northstar.importImage(); if (src) addNode('image', undefined, undefined, src) }
+  const vectorizeSelected = async () => {
+    if (!selected || selected.kind !== 'image' || !selected.src) return
+    try { setMessage('이미지 윤곽을 분석하고 있습니다…'); setVectorPreview({ nodeId: selected.id, result: await vectorizeImage(selected.src) }); setMessage('벡터 미리보기를 만들었습니다') }
+    catch (error) { setMessage(error instanceof Error ? safeDisplayText(error.message, '이미지를 벡터화하지 못했습니다') : '이미지를 벡터화하지 못했습니다') }
+  }
+  const applyVectorization = () => {
+    if (!vectorPreview) return
+    updateNode(vectorPreview.nodeId, { vectorData: vectorPreview.result })
+    setVectorPreview(null); setMessage('벡터 경로를 적용했습니다. 원본 이미지는 레이어에 보존됩니다.')
+  }
   const editDimension = (key: 'x' | 'y' | 'width' | 'height' | 'rotation', event: ChangeEvent<HTMLInputElement>) => {
     if (!selected) return
     const value = Number(event.target.value)
@@ -337,10 +357,10 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><div className="brand-mark">N</div><span>northstar</span><span className="brand-divider" /><span className="workspace-label">워크스페이스</span></div>
-      <div className="document-tab"><span className="doc-dot" />{document.name}<span className="tab-close"><X size={13} /></span></div>
-      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> {psd ? 'PSD 사본 저장' : '.nbdoc 저장'}</button><div style={{ position: 'relative' }}><button className="button subtle" aria-haspopup="menu" aria-expanded={exportOpen} onClick={() => setExportOpen((open) => !open)}><Download size={15} /> 내보내기</button>{exportOpen && <div className="export-menu" role="menu" aria-label="파일 형식 선택" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 20, minWidth: 210, padding: 6, border: '1px solid #35363a', borderRadius: 8, background: '#1b1c1f', boxShadow: '0 8px 24px #0008' }}>{([['png', 'PNG 이미지'], ['jpeg', 'JPEG 이미지'], ['psd', 'PSD 평면 문서'], ['svg', 'Illustrator용 SVG'], ['pdf', 'PDF 문서 · 평면 이미지'], ['ai', 'Illustrator AI · 사진은 래스터']] as const).map(([format, label]) => <button role="menuitem" key={format} style={{ display: 'block', width: '100%', padding: '9px 10px', border: 0, borderRadius: 5, background: 'transparent', color: '#eee', textAlign: 'left', cursor: 'pointer' }} onClick={() => void exportFile(format)}>{label}</button>)}</div>}</div><button className="avatar">J</button></div>
+      <div className="document-tab" title={safeDisplayText(document.name, 'Untitled')}><span className="doc-dot" />{safeDisplayText(document.name, 'Untitled')}<span className="tab-close"><X size={13} /></span></div>
+      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> {psd ? 'PSD 사본 저장' : '.nbdoc 저장'}</button><div style={{ position: 'relative' }}><button className="button subtle" aria-haspopup="menu" aria-expanded={exportOpen} onClick={() => setExportOpen((open) => !open)}><Download size={15} /> 내보내기</button>{exportOpen && <div className="export-menu" role="menu" aria-label="파일 형식 선택" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 20, minWidth: 210, padding: 6, border: '1px solid #35363a', borderRadius: 8, background: '#1b1c1f', boxShadow: '0 8px 24px #0008' }}>{([['png', 'PNG 이미지'], ['jpeg', 'JPEG 이미지'], ['psd', 'PSD 평면 문서'], ['svg', 'Illustrator용 SVG'], ['pdf', 'PDF 문서 · 평면 이미지'], ['ai', 'Illustrator AI · 벡터 경로 포함']] as const).map(([format, label]) => <button role="menuitem" key={format} style={{ display: 'block', width: '100%', padding: '9px 10px', border: 0, borderRadius: 5, background: 'transparent', color: '#eee', textAlign: 'left', cursor: 'pointer' }} onClick={() => void exportFile(format)}>{label}</button>)}</div>}</div><button className="avatar">J</button></div>
     </header>
-    <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{psd?.name ?? document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status" role="status" aria-live="polite"><span className="saved-dot" />{message}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : aiImport ? `AI 가져오기 · PDF ${aiImport.pdfVersion}` : 'NBDOC · RGB · 8비트'}</div></div>
+    <div className="subbar"><div className="crumb" title={safeDisplayText(psd?.name ?? document.name, '가져온 문서')}><span>내 파일</span><span className="crumb-sep">/</span><strong>{safeDisplayText(psd?.name ?? document.name, '가져온 문서')}</strong><ChevronDown size={13} /></div><div className="canvas-status" role="status" aria-live="polite"><span className="saved-dot" />{safeDisplayText(message, '상태 업데이트')}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : aiImport ? `AI 가져오기 · PDF ${safeDisplayText(aiImport.pdfVersion, '?')}` : 'NBDOC · RGB · 8비트'}</div></div>
     <div className="workspace">
       <aside className="tool-rail">
         <div className="tool-group"><ToolButton active={tool === 'select'} label="선택" onClick={() => setTool('select')}><MousePointer2 /></ToolButton>{!psd && <><ToolButton active={tool === 'rect'} label="사각형" onClick={() => setTool('rect')}><Square /></ToolButton><ToolButton active={tool === 'ellipse'} label="타원" onClick={() => setTool('ellipse')}><Circle /></ToolButton><ToolButton active={tool === 'text'} label="텍스트" onClick={() => setTool('text')}><Type /></ToolButton><ToolButton active={false} label="이미지 가져오기" onClick={() => void importImage()}><ImagePlus /></ToolButton></>}</div>
@@ -361,7 +381,9 @@ export default function App() {
               {node.kind === 'text' && <text x={node.textAlign === 'middle' ? node.x + node.width / 2 : node.textAlign === 'end' ? node.x + node.width : node.x} y={node.y + (node.fontSize ?? 40)} textLength={node.width} lengthAdjust="spacingAndGlyphs" fontSize={node.fontSize ?? 40} fontFamily={node.fontFamily || undefined} fontWeight={node.fontWeight ?? 600} textAnchor={node.textAlign ?? 'start'} fill={node.fill}>{node.text}</text>}
               {node.kind === 'aiText' && <text x={node.x} y={document.height - node.y} fontSize={node.fontSize ?? 12} fontFamily="Arial, sans-serif" fill={node.fill}>{node.text}</text>}
               {node.kind === 'path' && <path data-canvas-path="true" d={pathToSvg(node.pathSegments ?? [], document.height, ['s', 'b', 'b*'].includes(node.pathPaint ?? '') )} fill={['f', 'F', 'f*', 'B', 'B*', 'b', 'b*'].includes(node.pathPaint ?? '') ? node.fill : 'none'} fillRule={['f*', 'B*', 'b*'].includes(node.pathPaint ?? '') ? 'evenodd' : 'nonzero'} stroke={['S', 's', 'B', 'B*', 'b', 'b*'].includes(node.pathPaint ?? '') ? node.fill : 'none'} strokeWidth="1" strokeLinecap="butt" strokeLinejoin="miter" pointerEvents="visiblePainted" />}
-              {node.kind === 'image' && node.src && <image href={node.src} x={node.x} y={node.y} width={node.width} height={node.height} preserveAspectRatio="xMidYMid slice" />}
+              {node.kind === 'image' && node.src && (node.vectorData
+                ? <svg x={node.x} y={node.y} width={node.width} height={node.height} viewBox={`0 0 ${node.vectorData.sourceWidth} ${node.vectorData.sourceHeight}`} preserveAspectRatio="none" data-testid="vectorized-image">{node.vectorData.paths.map((path, index) => <path key={index} d={path.d} fill={path.fill} />)}</svg>
+                : <image href={node.src} x={node.x} y={node.y} width={node.width} height={node.height} preserveAspectRatio="xMidYMid slice" />)}
               {selectedIds.includes(node.id) && !selectedGroup && <rect className="selection-outline" x={node.x - 2} y={(node.kind === 'path' ? document.height - node.y - node.height : node.kind === 'aiText' ? document.height - node.y - node.height : node.y) - 2} width={node.width + 4} height={node.height + 4} fill="none" stroke="#7277ff" strokeWidth={2} strokeDasharray="7 4" pointerEvents="none" />}
             </g>})}
             {selectedGroup && <rect data-testid="group-selection-outline" x={selectedGroup.x} y={selectedGroup.y} width={selectedGroup.width} height={selectedGroup.height} transform={`rotate(${selectedGroup.rotation} ${selectedGroup.x + selectedGroup.width / 2} ${selectedGroup.y + selectedGroup.height / 2})`} fill="none" stroke="#a18ad3" strokeWidth={3} strokeDasharray="9 5" pointerEvents="none" />}
@@ -391,11 +413,13 @@ export default function App() {
             {selected.kind !== 'image' && <><label className="field-label position-label">채우기</label><div className="color-control"><span className="color-preview" style={{ background: selected.fill }} /><input aria-label="색상 코드" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /><input aria-label="색상 선택" type="color" value={selected.fill} onChange={(event) => updateNode(selected.id, { fill: event.target.value })} /></div></>}
             <div className="property-row opacity-row"><label>불투명도</label><span className="opacity-number">{selected.opacity}%</span></div><input className="opacity-slider" type="range" min="0" max="100" value={selected.opacity} onChange={(event) => updateNode(selected.id, { opacity: Number(event.target.value) })} />
             <div className="swatches">{palettes.map((color) => <button key={color} className={`swatch ${selected.fill === color ? 'chosen' : ''}`} style={{ background: color }} title={color} onClick={() => updateNode(selected.id, { fill: color })} />)}</div>
+            {selected.kind === 'image' && selected.src && <div className="vectorize-controls"><button className="button subtle" onClick={() => void vectorizeSelected()}>{selected.vectorData ? '다시 벡터화' : '이미지 벡터화'}</button><span>원본 이미지는 문서에 보존됩니다. 윤곽 근사이며 작은 디테일과 사진 질감은 단순화됩니다.</span>{selected.vectorData && <small>적용됨 · {selected.vectorData.paths.length}개 경로</small>}</div>}
             <div className="layer-order"><button onClick={() => reorder(selected.id, 1)}><ArrowUp size={13} />앞으로</button><button onClick={() => reorder(selected.id, -1)}><ArrowDown size={13} />뒤로</button></div>
           </div> : null}
         </section>
       </aside>
     </div>
+    {vectorPreview && <div className="vector-preview-backdrop" role="presentation"><section className="vector-preview" role="dialog" aria-modal="true" aria-labelledby="vector-preview-title"><header><strong id="vector-preview-title">벡터화 미리보기</strong><button className="icon-button" aria-label="닫기" onClick={() => setVectorPreview(null)}><X size={16} /></button></header><div className="vector-preview-grid"><div><b>원본 이미지</b><img src={document.nodes.find((node) => node.id === vectorPreview.nodeId)?.src} alt="원본 이미지 미리보기" /></div><div><b>단순화된 벡터 경로</b><svg viewBox={`0 0 ${vectorPreview.result.sourceWidth} ${vectorPreview.result.sourceHeight}`} role="img" aria-label="벡터 경로 미리보기">{vectorPreview.result.paths.map((path, index) => <path key={index} d={path.d} fill={path.fill} />)}</svg></div></div><p>최대 256픽셀 분석 해상도와 최대 64색을 사용합니다. 복잡한 이미지는 경로 수 제한으로 일부 색 영역이 빠질 수 있으며, 사진의 질감·미세한 윤곽은 보존되지 않을 수 있습니다. 적용 후에도 원본은 이미지 레이어에 남습니다.</p><footer><button className="button subtle" onClick={() => setVectorPreview(null)}>취소</button><button className="button primary" onClick={applyVectorization}>경로 적용</button></footer></section></div>}
   </div>
 }
 
@@ -405,6 +429,13 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
 
 function objectTop(node: EditorNode, documentHeight: number): number {
   return node.kind === 'path' || node.kind === 'aiText' ? documentHeight - node.y - node.height : node.y
+}
+
+function formatExportSize(bytes: number): string {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return '크기 확인 실패'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 function createExportSvg(source: SVGSVGElement | null, width: number, height: number, background: string): string {

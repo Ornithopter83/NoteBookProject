@@ -38,6 +38,8 @@ export interface EditorNode {
   resourcePath?: string
   pathSegments?: VectorSegment[]
   pathPaint?: 'S' | 's' | 'f' | 'F' | 'f*' | 'B' | 'B*' | 'b' | 'b*'
+  /** Vector paths derived from src; src is retained as the original image. */
+  vectorData?: { sourceWidth: number; sourceHeight: number; paths: { d: string; fill: string }[] }
   visible: boolean
   locked: boolean
 }
@@ -54,6 +56,24 @@ export interface EditorDocument {
   groups?: NodeGroup[]
 }
 
+const MAX_VECTOR_DIMENSION = 256
+const MAX_VECTOR_PATHS = 4096
+const MAX_VECTOR_PATH_LENGTH = 200_000
+const MAX_VECTOR_PATH_DATA_LENGTH = 2_000_000
+
+function isValidVectorData(value: EditorNode['vectorData']): boolean {
+  if (!value || !Number.isFinite(value.sourceWidth) || !Number.isFinite(value.sourceHeight) ||
+    value.sourceWidth < 1 || value.sourceHeight < 1 || value.sourceWidth > MAX_VECTOR_DIMENSION || value.sourceHeight > MAX_VECTOR_DIMENSION ||
+    !Array.isArray(value.paths) || value.paths.length > MAX_VECTOR_PATHS) return false
+  let pathDataLength = 0
+  for (const path of value.paths) {
+    if (!path || typeof path.d !== 'string' || path.d.length > MAX_VECTOR_PATH_LENGTH || !/^#[\da-f]{6}$/i.test(path.fill) || !/^[MmLlZz0-9.,\s-]+$/.test(path.d)) return false
+    pathDataLength += path.d.length
+    if (pathDataLength > MAX_VECTOR_PATH_DATA_LENGTH) return false
+  }
+  return true
+}
+
 export const createDocument = (): EditorDocument => ({
   format: 'northstar-document', version: 1, name: 'Untitled', width: 1440, height: 960,
   background: '#f5f4f0', nodes: [], groups: []
@@ -65,6 +85,8 @@ export function validateDocument(value: unknown): EditorDocument {
   if (document.format !== 'northstar-document' || document.version !== 1 || !Array.isArray(document.nodes)) {
     throw new Error('지원하지 않는 .nbdoc 형식입니다.')
   }
+  const incomingName = typeof document.name === 'string' ? document.name : ''
+  document.name = isSafeDocumentName(incomingName) ? incomingName.trim() : safeDisplayText(incomingName, '가져온 문서')
   if (!Number.isFinite(document.width) || !Number.isFinite(document.height) || document.width! <= 0 || document.height! <= 0) {
     throw new Error('문서 크기가 올바르지 않습니다.')
   }
@@ -78,6 +100,9 @@ export function validateDocument(value: unknown): EditorDocument {
     }
     if (node.kind === 'path') {
       if (!isValidPathSegments(node.pathSegments) || !['S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*'].includes(node.pathPaint ?? '')) throw new Error('벡터 경로 데이터가 올바르지 않습니다.')
+    }
+    if (node.vectorData && (node.kind !== 'image' || !isValidVectorData(node.vectorData))) {
+      throw new Error('벡터화 데이터가 올바르지 않습니다.')
     }
     if (node.kind === 'aiText' && (typeof node.text !== 'string' || !/^[\x20-\x7e]*$/.test(node.text) || !Number.isFinite(node.fontSize) || node.fontSize! <= 0)) throw new Error('AI 텍스트는 인쇄 가능한 ASCII와 양수 글꼴 크기여야 합니다.')
     if (node.kind === 'text' && node.text !== undefined && typeof node.text !== 'string') throw new Error('텍스트 데이터가 올바르지 않습니다.')
@@ -112,6 +137,18 @@ export function validateDocument(value: unknown): EditorDocument {
     memberships.add(id)
   }
   return document as EditorDocument
+}
+
+/** Reject binary metadata and control characters while preserving normal Unicode, including Korean. */
+export function isSafeDocumentName(value: string): boolean {
+  const name = value.trim()
+  return Boolean(name && name.length <= 200 && !/[\u0000-\u001f\u007f-\u009f]/.test(name) && !/\/I\d{2}\s+N\s*=|SourceId|%PDF-|Adobe Illustrator/i.test(name))
+}
+
+export function safeDisplayText(value: unknown, fallback = ''): string {
+  if (typeof value !== 'string') return fallback
+  const clean = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffd]/g, '').replace(/\/I\d{1,3}\s+N\s*=\s*(?:"[^"]*"|'[^']*'|[^\s/]+)/gi, '').trim()
+  return clean && !/SourceId|%PDF-/i.test(clean) ? clean.slice(0, 240) : fallback
 }
 
 export function isValidPathSegments(value: unknown): value is VectorSegment[] {

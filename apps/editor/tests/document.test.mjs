@@ -54,3 +54,14 @@ test('preserves vector path data and group transform metadata during validation'
   assert.equal(validated.groups[0].rotation, 17.5)
   assert.throws(() => validateDocument({ ...createDocument(), nodes: [{ ...path, pathSegments: [{ op: 'C', points: [[1, 2]] }] }] }), /벡터 경로 데이터/)
 })
+
+test('accepts bounded raster vector data and rejects oversized or unsafe path payloads', () => {
+  const image = { id: 'image-1', name: '벡터 이미지', kind: 'image', x: 0, y: 0, width: 20, height: 20, fill: '#fff', opacity: 100, rotation: 0, visible: true, locked: false,
+    src: 'data:image/png;base64,iVBORw0KGgo=', vectorData: { sourceWidth: 2, sourceHeight: 2, paths: [{ d: 'M0,0L2,0L2,2L0,2Z', fill: '#ff0000' }] } }
+  const validated = validateDocument({ ...createDocument(), nodes: [image] })
+  assert.equal(validated.nodes[0].vectorData.sourceWidth, 2)
+  assert.equal(validated.nodes[0].src, image.src)
+  assert.throws(() => validateDocument({ ...createDocument(), nodes: [{ ...image, vectorData: { ...image.vectorData, sourceWidth: 257 } }] }), /벡터화 데이터/)
+  assert.throws(() => validateDocument({ ...createDocument(), nodes: [{ ...image, vectorData: { ...image.vectorData, paths: [{ d: 'M0,0Z<script>', fill: '#ff0000' }] } }] }), /벡터화 데이터/)
+  assert.throws(() => validateDocument({ ...createDocument(), nodes: [{ ...image, vectorData: { ...image.vectorData, paths: [{ d: 'M' + '0'.repeat(200_001), fill: '#ff0000' }] } }] }), /벡터화 데이터/)
+})

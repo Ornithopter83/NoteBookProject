@@ -1,9 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
@@ -95,7 +95,39 @@ function makePdf(width: number, height: number, rgba: Uint8Array): Buffer {
   return Buffer.concat(chunks)
 }
 
-async function saveNativeIllustratorFile(svg: string, destination: string): Promise<void> {
+async function persistExport(destination: string, bytes: Buffer): Promise<number> {
+  const staged = path.join(path.dirname(destination), `.${path.basename(destination)}-${randomUUID()}.tmp`)
+  try {
+    await writeFile(staged, bytes, { flag: 'wx' })
+    const stagedInfo = await stat(staged)
+    if (!stagedInfo.isFile() || stagedInfo.size !== bytes.byteLength || stagedInfo.size === 0) {
+      throw new Error('내보내기 임시 파일의 실제 크기 확인에 실패했습니다.')
+    }
+    await publishStagedFile(staged, destination)
+    const finalInfo = await stat(destination)
+    if (!finalInfo.isFile() || finalInfo.size !== bytes.byteLength || finalInfo.size === 0) {
+      throw new Error('저장 경로에서 내보낸 파일의 실제 크기를 확인할 수 없습니다.')
+    }
+    return finalInfo.size
+  } finally {
+    await rm(staged, { force: true })
+  }
+}
+
+async function publishStagedFile(staged: string, destination: string): Promise<void> {
+  try {
+    // Both files are in the destination directory. A hard link publishes the complete
+    // staged bytes atomically and fails with EEXIST instead of replacing an old file.
+    await link(staged, destination)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error('EXPORT_DESTINATION_EXISTS:기존 파일을 보호하기 위해 내보내기를 취소했습니다. 다른 파일명을 선택해 주세요.')
+    }
+    throw error
+  }
+}
+
+async function saveNativeIllustratorFile(svg: string, destination: string): Promise<number> {
   if (process.platform !== 'win32') throw new Error('Illustrator AI 자동 저장은 Windows에 설치된 Adobe Illustrator가 필요합니다. SVG 또는 PDF로 내보내 주세요.')
   if (!svg.trim().startsWith('<svg')) throw new Error('Illustrator에 전달할 SVG 데이터가 유효하지 않습니다.')
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'northstar-ai-export-'))
@@ -103,21 +135,21 @@ async function saveNativeIllustratorFile(svg: string, destination: string): Prom
   const tempJsx = path.join(tempDir, 'save-and-reopen.jsx')
   const tempAi = path.join(tempDir, 'artwork.ai')
   const stagedAi = path.join(path.dirname(destination), `.${path.basename(destination, '.ai')}-${randomUUID()}.tmp.ai`)
+  const errorFile = path.join(tempDir, 'automation-error.txt')
   try {
     await writeFile(tempSvg, svg, 'utf8')
     const jsxPath = JSON.stringify(tempSvg).replace(/[\u0080-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
     const aiPath = JSON.stringify(tempAi).replace(/[\u0080-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
     const jsx = `var sourceDoc; var verifyDoc; try { sourceDoc = app.open(new File(${jsxPath})); var saveOptions = new IllustratorSaveOptions(); saveOptions.pdfCompatible = true; sourceDoc.saveAs(new File(${aiPath}), saveOptions); sourceDoc.close(SaveOptions.DONOTSAVECHANGES); sourceDoc = null; verifyDoc = app.open(new File(${aiPath})); if (!verifyDoc) throw new Error("Saved AI could not be reopened"); verifyDoc.close(SaveOptions.DONOTSAVECHANGES); verifyDoc = null; "OK"; } catch (e) { try { if (verifyDoc) verifyDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {} try { if (sourceDoc) sourceDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {} throw e; }`
     await writeFile(tempJsx, jsx, 'ascii')
-    const ps = `$ErrorActionPreference = 'Stop'; try { $app = New-Object -ComObject Illustrator.Application } catch { [Console]::Error.WriteLine('NO_ILLUSTRATOR: ' + $_.Exception.Message); exit 24 }; try { $result = $app.DoJavaScriptFile($env:NORTHSTAR_ILLUSTRATOR_SCRIPT); if ($result -ne 'OK') { throw "Illustrator scripting failed: $result" } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 23 }`
+    const ps = `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding -ArgumentList $false; $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false; try { $app = New-Object -ComObject Illustrator.Application } catch { [IO.File]::WriteAllText($env:NORTHSTAR_ILLUSTRATOR_ERROR, ('NO_ILLUSTRATOR: ' + $_.Exception.Message), $utf8); exit 24 }; try { $result = $app.DoJavaScriptFile($env:NORTHSTAR_ILLUSTRATOR_SCRIPT); if ($result -ne 'OK') { throw "Illustrator scripting failed: $result" } } catch { [IO.File]::WriteAllText($env:NORTHSTAR_ILLUSTRATOR_ERROR, $_.Exception.ToString(), $utf8); exit 23 }`
     const encoded = Buffer.from(ps, 'utf16le').toString('base64')
     await new Promise<void>((resolve, reject) => {
       const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe'],
-        env: { ...process.env, NORTHSTAR_ILLUSTRATOR_SCRIPT: tempJsx }
+        env: { ...process.env, NORTHSTAR_ILLUSTRATOR_SCRIPT: tempJsx, NORTHSTAR_ILLUSTRATOR_ERROR: errorFile }
       })
-      let stderr = ''
       let settled = false
       const finish = (error?: Error) => {
         if (settled) return
@@ -130,22 +162,34 @@ async function saveNativeIllustratorFile(svg: string, destination: string): Prom
         child.kill()
         finish(new Error(`ILLUSTRATOR_TIMEOUT: ${ILLUSTRATOR_AUTOMATION_TIMEOUT_MS / 1000}초 안에 Illustrator 자동화가 끝나지 않았습니다.`))
       }, ILLUSTRATOR_AUTOMATION_TIMEOUT_MS)
-      child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8192) })
+      // PowerShell redirection may use an OEM code page. Read diagnostics from the UTF-8 file instead.
+      child.stderr?.on('data', () => undefined)
       child.once('error', (error) => finish(new Error(`AUTOMATION_HOST_UNAVAILABLE: ${error.message}`)))
-      child.once('close', (code) => {
+      child.once('close', async (code) => {
         if (code === 0) return finish()
-        const detail = stderr.trim() || `PowerShell exited with code ${code}`
-        if (/user\s*cancel|cancelled|canceled|operation canceled/i.test(detail)) return finish(new Error(`ILLUSTRATOR_CANCELLED: ${detail}`))
+        let detail = `PowerShell exited with code ${code}`
+        try { detail = (await readFile(errorFile, 'utf8')).trim() || detail } catch { /* no diagnostic file */ }
+        if (/user\s*cancel|cancelled|canceled|operation canceled|취소|800704c7|2147023673/i.test(detail)) return finish(new Error(`ILLUSTRATOR_CANCELLED: ${detail}`))
         finish(new Error(detail))
       })
     })
     const saved = await readFile(tempAi)
-    const report = inspectAi(saved)
-    if (!report.compatible || report.status !== 'pdf-compatible-ai') throw new Error('Illustrator가 만든 파일이 PDF 호환 네이티브 AI 형식인지 확인할 수 없습니다.')
+    if (saved.byteLength < 32 || saved.subarray(0, 5).toString('ascii') !== '%PDF-' || saved.lastIndexOf(Buffer.from('%%EOF')) < 0) {
+      throw new Error('Illustrator 재열기는 성공했지만 저장 파일의 PDF 호환 AI 서명 또는 끝 표시가 유효하지 않습니다.')
+    }
     await writeFile(stagedAi, saved, { flag: 'wx' })
-    await rename(stagedAi, destination)
+    const stagedInfo = await stat(stagedAi)
+    if (!stagedInfo.isFile() || stagedInfo.size !== saved.byteLength || stagedInfo.size === 0) throw new Error('저장한 AI 파일의 실제 크기 확인에 실패했습니다.')
+    await publishStagedFile(stagedAi, destination)
+    const finalInfo = await stat(destination)
+    if (!finalInfo.isFile() || finalInfo.size !== saved.byteLength || finalInfo.size === 0) throw new Error('저장 경로에서 AI 파일의 실제 크기를 확인할 수 없습니다.')
+    const finalBytes = await readFile(destination)
+    const savedHash = createHash('sha256').update(saved).digest('hex')
+    if (createHash('sha256').update(finalBytes).digest('hex') !== savedHash) throw new Error('저장된 AI 파일의 SHA-256 무결성 확인에 실패했습니다.')
+    return finalInfo.size
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
+    if (detail.startsWith('EXPORT_DESTINATION_EXISTS:')) throw new Error(detail.slice('EXPORT_DESTINATION_EXISTS:'.length))
     if (detail.includes('NO_ILLUSTRATOR:')) {
       throw new Error(`Adobe Illustrator가 설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다. .ai 파일은 생성되지 않았습니다. Illustrator 설치 상태를 확인하거나 SVG/PDF 내보내기를 사용하세요. (${detail})`)
     }
@@ -415,8 +459,8 @@ ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpe
   if (sourcePath && await isSameFileOrPath(sourcePath, destination)) throw new Error('열어 둔 원본 파일은 덮어쓸 수 없습니다. 다른 경로로 내보내 주세요.')
   if (payload.format === 'ai') {
     if (typeof payload.svg !== 'string') throw new Error('Illustrator AI 저장용 SVG가 없습니다.')
-    await saveNativeIllustratorFile(payload.svg, destination)
-    return { filePath: destination }
+    const bytes = await saveNativeIllustratorFile(payload.svg, destination)
+    return { filePath: destination, bytes }
   }
   const width = payload.width; const height = payload.height
   let output: Buffer
@@ -430,8 +474,8 @@ ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpe
     if (!(payload.pixels instanceof Uint8Array)) throw new Error('픽셀 데이터가 없습니다.')
     output = payload.format === 'psd' ? makeFlatPsd(width, height, payload.pixels) : makePdf(width, height, payload.pixels)
   }
-  await writeFile(destination, output)
-  return { filePath: destination }
+  const bytes = await persistExport(destination, output)
+  return { filePath: destination, bytes }
 })
 
 void app.whenReady().then(() => {
