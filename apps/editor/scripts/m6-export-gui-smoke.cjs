@@ -81,7 +81,7 @@ async function main() {
       await waitFor(`document.querySelector('.canvas-status')?.innerText.includes('${format.toUpperCase()}를 내보냈습니다')`, `${format} write`)
       assert.ok(fs.statSync(output[format]).size > 30, `${format} export is empty`)
     }
-    const png = fs.readFileSync(output.png); assert.equal(png.toString('hex', 0, 8), '89504e470d0a1a0a'); assert.equal(png.readUInt32BE(16), 320); assert.equal(png.readUInt32BE(20), 200); assert.equal(png.toString('hex', -8), '49454e44ae426082')
+    const png = fs.readFileSync(output.png); assert.equal(png.toString('hex', 0, 8), '89504e470d0a1a0a'); assert.equal(png.readUInt32BE(16), 320); assert.equal(png.readUInt32BE(20), 200); assert.equal(png.subarray(-8).toString('hex'), '49454e44ae426082')
     const jpeg = fs.readFileSync(output.jpeg); assert.equal(jpeg[0], 0xff); assert.equal(jpeg[1], 0xd8); assert.ok(jpeg.includes(Buffer.from([0xff, 0xc0])) || jpeg.includes(Buffer.from([0xff, 0xc2])), 'JPEG frame header is missing')
     const svg = fs.readFileSync(output.svg, 'utf8'); assert.match(svg, /<svg/); assert.match(svg, /한글 내보내기/); assert.match(svg, /font-family="Arial"/); assert.match(svg, /rotate\(12 /); assert.match(svg, /data-canvas-path="true"/); assert.match(svg, /data:image\/gif;base64,/); assert.doesNotMatch(svg, /selection-outline|00ff99|data-node-id="hidden"/)
     assert.match(fs.readFileSync(output.pdf, 'latin1'), /^%PDF-1\.4/)
