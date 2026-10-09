@@ -17,12 +17,16 @@ Layer IDs are dot-separated indices in PSD top-to-bottom order and remain stable
 
 ## Limits and warnings
 
-Default input limits are 512 MiB per PSD, 100 million canvas pixels, 10,000 layers, 64 group levels, and 1 GiB of decoded image buffers. Callers can override these limits per `openPsd` invocation. The bridge preflights the PSD signature, version, dimensions, channels, and bit depth before parsing. PSB is rejected.
+Default input limits are 512 MiB per PSD, 100 million canvas pixels, 10,000 layers, 64 group levels, and 1 GiB of decoded image buffers. Callers can override these limits per `openPsd` invocation. The bridge preflights the PSD signature, version, dimensions, channels, color mode, bit depth, and section lengths before parsing. Only 8-, 16-, and 32-bit inputs are accepted; PSB, 1-bit bitmap, and other bit depths are rejected. The writer checks a conservative output estimate based on the source file size, decoded canvas/layer pixels, and record overhead before encoding, then checks the actual file size. Large documents can be refused when the estimate cannot safely fit the configured output limit.
 
 `document.warnings` reports special layers (text, adjustment, smart object, and vector), masks/effects/blending ranges, and the fact that a layer edit does not redraw the flattened composite preview. These source properties are passed through when supported by ag-psd, but the bridge does not render those layer types or regenerate the flattened preview; inspect edited files in the target editor. ag-psd feature coverage is not full Photoshop fidelity, so the bridge is intended for ordinary layered PSDs and explicit warnings should be surfaced to users before saving.
 
 The bridge does not modify raster pixels. Pixel data is exposed for reading and copied to prevent accidental mutation. Layer names, positions, visibility, opacity, and nested group structure are editable/preserved.
 
+## Compatibility verification
+
+The current regression fixtures are generated in tests with `ag-psd`; this package contains no Photoshop-generated PSD sample. Therefore this suite verifies the bridge's synthetic PSD round trips and malformed-input handling only. It does not claim compatibility validation against Adobe Photoshop. When an authentic sample is added, record its source and Photoshop version alongside it, then test its layer hierarchy, supported layer properties, and RGBA pixels through save/reopen cycles.
+
 ## Development
 
-Run `npm install`, `npm run build`, and `npm test`. The test suite makes a nested-group RGBA fixture and verifies the edited document through three save/reopen cycles, as well as input limits and edit validation.
+Run `npm install`, `npm run build`, and `npm test`. The test suite makes nested-group and multi-layer RGBA fixtures and verifies save/reopen behavior, input and output limits, malformed/truncated headers, unsupported bit depths, and edit validation.

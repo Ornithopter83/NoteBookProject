@@ -39,6 +39,8 @@ export interface PdfSubsetDocument {
 export interface AiInspection {
   status: 'pdf-compatible-ai' | 'pdf-without-ai-marker' | 'unsupported' | 'invalid'
   compatible: boolean
+  /** Always unverified unless an Illustrator-generated fixture is independently documented and tested. */
+  adobeCompatibility: 'unverified'
   pdfVersion?: string
   pages?: number
   supportedFeatures?: string[]

@@ -1,0 +1,127 @@
+name: M4 Windows package validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-package-validation:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/editor/package-lock.json
+
+      - name: Install and build PSD bridge
+        working-directory: packages/psd-bridge
+        run: |
+          npm ci
+          npm run build
+
+      - name: Validate AI bridge
+        working-directory: packages/ai-bridge
+        run: npm run check
+
+      - name: Install editor and packaging dependencies
+        working-directory: apps/editor
+        run: npm ci
+
+      - name: Build Windows package inputs
+        working-directory: apps/editor
+        run: npm run build
+
+      - name: Typecheck and test editor document model
+        working-directory: apps/editor
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Create unsigned x64 Windows ZIP package
+        working-directory: apps/editor
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: 'false'
+        run: npm run package:win
+
+      - name: Extract the package and verify its entry points
+        id: extract
+        shell: pwsh
+        working-directory: apps/editor
+        run: |
+          $archive = Get-ChildItem release -Filter 'Northstar-Editor-*-win-x64.zip' | Select-Object -First 1
+          if (-not $archive) { throw 'Windows ZIP package was not generated.' }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'northstar-m4-extracted'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractRoot -Force
+          $appExe = Get-ChildItem -LiteralPath $extractRoot -Filter 'Northstar Editor.exe' -File -Recurse | Select-Object -First 1
+          if (-not $appExe) { throw 'Packaged Northstar Editor.exe is missing.' }
+          $appAsar = Get-ChildItem -LiteralPath $extractRoot -Filter 'app.asar' -File -Recurse | Select-Object -First 1
+          if (-not $appAsar) { throw 'Packaged app.asar is missing.' }
+          $packageBytes = (Get-Item -LiteralPath $archive.FullName).Length
+          $expandedBytes = (Get-ChildItem -LiteralPath $extractRoot -File -Recurse | Measure-Object -Property Length -Sum).Sum
+          "PACKAGED_EXE=$($appExe.FullName)" >> $env:GITHUB_OUTPUT
+          "PACKAGE_PATH=$($archive.FullName)" >> $env:GITHUB_OUTPUT
+          "PACKAGE_BYTES=$packageBytes" >> $env:GITHUB_OUTPUT
+          "EXPANDED_BYTES=$expandedBytes" >> $env:GITHUB_OUTPUT
+          "Package: $([math]::Round($packageBytes / 1MB, 2)) MiB; extracted: $([math]::Round($expandedBytes / 1MB, 2)) MiB." | Out-Host
+
+      - name: Run GUI smoke against the extracted packaged app
+        id: packaged_gui
+        working-directory: apps/editor
+        env:
+          NORTHSTAR_PACKAGED_EXE: ${{ steps.extract.outputs.PACKAGED_EXE }}
+        run: npm run smoke:packaged-gui
+
+      - name: Run M1 and M2 Windows GUI smokes
+        id: m1_m2_gui
+        working-directory: apps/editor
+        run: |
+          npm run smoke:gui
+          npm run smoke:psd-gui
+          npm run smoke:ai-gui
+
+      - name: Run M3 Windows editor GUI smoke
+        id: m3_gui
+        working-directory: apps/editor
+        run: npm run smoke:m3-gui
+
+      - name: Record package evidence
+        if: always() && steps.extract.outcome == 'success'
+        shell: pwsh
+        env:
+          PACKAGE_BYTES: ${{ steps.extract.outputs.PACKAGE_BYTES }}
+          EXPANDED_BYTES: ${{ steps.extract.outputs.EXPANDED_BYTES }}
+          PACKAGE_PATH: ${{ steps.extract.outputs.PACKAGE_PATH }}
+          PACKAGED_GUI_RESULT: ${{ steps.packaged_gui.outcome }}
+          M1_M2_GUI_RESULT: ${{ steps.m1_m2_gui.outcome }}
+          M3_GUI_RESULT: ${{ steps.m3_gui.outcome }}
+        run: |
+          $packageMiB = [math]::Round(([double]$env:PACKAGE_BYTES / 1MB), 2)
+          $expandedMiB = [math]::Round(([double]$env:EXPANDED_BYTES / 1MB), 2)
+          @"
+          ## M4 Windows packaging
+
+          - Package: ``$env:PACKAGE_PATH``
+          - ZIP size: **$packageMiB MiB** ($env:PACKAGE_BYTES bytes)
+          - Extracted size: **$expandedMiB MiB** ($env:EXPANDED_BYTES bytes)
+          - Signing: **unsigned internal validation build** (no Northstar code-signing certificate configured)
+          - Packaged app GUI and M3 `.nbdoc` save/reopen: **$env:PACKAGED_GUI_RESULT**
+          - M1 `.nbdoc`, M2 PSD, and M2 AI GUI smokes: **$env:M1_M2_GUI_RESULT**
+          - M3 development GUI smoke: **$env:M3_GUI_RESULT**
+          "@ | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Windows ZIP package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-editor-windows-x64-unsigned
+          path: ${{ steps.extract.outputs.PACKAGE_PATH }}
+          if-no-files-found: error
+          retention-days: 14

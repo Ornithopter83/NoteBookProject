@@ -114,19 +114,28 @@ function closeSocket() {
 }
 
 async function main() {
+  const packagedExe = process.env.NORTHSTAR_PACKAGED_EXE
   await withStage('Electron installation', async () => {
-    electronBin = require('electron')
-    const version = execFileSync(electronBin, ['--version'], { cwd: appRoot, encoding: 'utf8' }).trim()
-    assert.match(version, /^v\d+\./, `Unexpected Electron version output: ${version}`)
-    log(`Electron ${version} at ${electronBin}`)
-    assert.ok(fs.existsSync(path.join(appRoot, 'out/main/index.js')), 'Built main process entry is missing')
-    assert.ok(fs.existsSync(path.join(appRoot, 'out/preload/index.cjs')), 'Built preload entry is missing')
-    assert.ok(fs.existsSync(path.join(appRoot, 'out/renderer/index.html')), 'Built renderer HTML is missing')
+    if (packagedExe) {
+      electronBin = path.resolve(packagedExe)
+      assert.ok(fs.existsSync(electronBin), `Packaged app executable is missing: ${electronBin}`)
+      log(`Packaged app executable at ${electronBin}`)
+    } else {
+      electronBin = require('electron')
+      const version = execFileSync(electronBin, ['--version'], { cwd: appRoot, encoding: 'utf8' }).trim()
+      assert.match(version, /^v\d+\./, `Unexpected Electron version output: ${version}`)
+      log(`Electron ${version} at ${electronBin}`)
+      assert.ok(fs.existsSync(path.join(appRoot, 'out/main/index.js')), 'Built main process entry is missing')
+      assert.ok(fs.existsSync(path.join(appRoot, 'out/preload/index.cjs')), 'Built preload entry is missing')
+      assert.ok(fs.existsSync(path.join(appRoot, 'out/renderer/index.html')), 'Built renderer HTML is missing')
+    }
   })
 
   const port = await freePort()
   const logStream = fs.createWriteStream(logPath, { encoding: 'utf8' })
-  child = spawn(electronBin, [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox', appRoot], {
+  const appArgs = [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox']
+  if (!packagedExe) appArgs.push(appRoot)
+  child = spawn(electronBin, appArgs, {
     cwd: appRoot,
     windowsHide: true,
     env: { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: documentPath }

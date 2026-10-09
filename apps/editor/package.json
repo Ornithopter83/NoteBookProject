@@ -5,17 +5,21 @@
   "type": "module",
   "description": "Northstar desktop illustration editor",
   "main": "out/main/index.js",
-  "engines": { "node": ">=22.6.0" },
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "package:win": "electron-builder --win zip --x64 --publish never",
     "preview": "electron-vite preview",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "smoke:gui": "node scripts/m1-gui-smoke.cjs",
     "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs",
     "smoke:ai-gui": "node scripts/m2-ai-gui-smoke.cjs",
-    "smoke:m3-gui": "node scripts/m3-editor-gui-smoke.cjs"
+    "smoke:m3-gui": "node scripts/m3-editor-gui-smoke.cjs",
+    "smoke:packaged-gui": "node scripts/m3-editor-gui-smoke.cjs"
   },
   "dependencies": {
     "@northstar/ai-bridge": "file:../../packages/ai-bridge",
@@ -25,14 +29,28 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "ag-psd": "^31.0.3",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "ag-psd": "^31.0.3",
     "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^3.0.0",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "com.northstar.editor",
+    "productName": "Northstar Editor",
+    "asar": true,
+    "directories": { "output": "release" },
+    "files": ["out/**", "package.json"],
+    "artifactName": "Northstar-Editor-${version}-win-${arch}.${ext}",
+    "forceCodeSigning": false,
+    "win": {
+      "target": [{ "target": "zip", "arch": ["x64"] }],
+      "signAndEditExecutable": false
+    }
   }
 }

@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
 import { openPsd, type LayerChanges, type PsdLayerView } from '@northstar/psd-bridge'
 import { analyzeAi, inspectAi } from '@northstar/ai-bridge'
+import { readFileWithinLimit } from './file-io'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const rendererUrl = process.env.ELECTRON_RENDERER_URL
@@ -107,19 +108,22 @@ ipcMain.handle('document:open', async () => {
   }
   if (path.extname(filePath).toLowerCase() === '.ai') {
     const sourcePath = await realpath(filePath)
-    const bytes = await readFile(sourcePath)
+    const bytes = await readFileWithinLimit(sourcePath, 64 * 1024 * 1024, 'AI')
     const report = inspectAi(bytes)
     if (!report.compatible || report.status !== 'pdf-compatible-ai') throw new Error(report.reason ?? 'PDF 호환 Illustrator AI 파일이 아닙니다.')
     if (report.pages !== 1) throw new Error('한 페이지 PDF 호환 AI 파일만 가져올 수 있습니다.')
-    const source = analyzeAi(bytes)
-    const page = source.pages[0]
-    const nodes = page.items.map((item, index) => {
-      if (item.type === 'path') {
-        const points = item.segments.flatMap((segment) => segment.points)
-        const xs = points.map((point) => point[0]); const ys = points.map((point) => point[1])
-        const x = xs.length ? Math.min(...xs) : 0; const y = ys.length ? Math.min(...ys) : 0
-        return { id: `ai-path-${index + 1}`, name: `AI 경로 ${index + 1}`, kind: 'path' as const, x, y, width: Math.max(1, (xs.length ? Math.max(...xs) - x : 0)), height: Math.max(1, (ys.length ? Math.max(...ys) - y : 0)), fill: '#000000', opacity: 100, rotation: 0, visible: true, locked: false, pathSegments: item.segments, pathPaint: item.paint }
-      }
+      const source = analyzeAi(bytes)
+      const page = source.pages[0]
+      const nodes = page.items.map((item, index) => {
+        if (item.type === 'path') {
+          let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity
+          for (const segment of item.segments) for (const [pointX, pointY] of segment.points) {
+            minX = Math.min(minX, pointX); minY = Math.min(minY, pointY)
+            maxX = Math.max(maxX, pointX); maxY = Math.max(maxY, pointY)
+          }
+          const x = Number.isFinite(minX) ? minX : 0; const y = Number.isFinite(minY) ? minY : 0
+          return { id: `ai-path-${index + 1}`, name: `AI 경로 ${index + 1}`, kind: 'path' as const, x, y, width: Math.max(1, Number.isFinite(maxX) ? maxX - x : 0), height: Math.max(1, Number.isFinite(maxY) ? maxY - y : 0), fill: '#000000', opacity: 100, rotation: 0, visible: true, locked: false, pathSegments: item.segments, pathPaint: item.paint }
+        }
       const [x, y] = item.position
       return { id: `ai-text-${index + 1}`, name: `AI 텍스트 ${index + 1}`, kind: 'aiText' as const, x, y, width: Math.max(1, item.text.length * item.fontSize * 0.6), height: Math.max(1, item.fontSize), fill: '#000000', opacity: 100, rotation: 0, visible: true, locked: false, text: item.text, fontSize: item.fontSize }
     })
@@ -129,7 +133,7 @@ ipcMain.handle('document:open', async () => {
     return { filePath, document, aiImport: { pdfVersion: source.pdfVersion, sourceName: path.basename(filePath), limitations: 'Illustrator 전용 데이터는 읽거나 보존하지 않습니다. 변환 문서는 .nbdoc로만 저장됩니다.' } }
   }
   if (path.extname(filePath).toLowerCase() === '.psd') {
-    const psd = openPsd(await readFile(filePath))
+    const psd = openPsd(await readFileWithinLimit(filePath, 512 * 1024 * 1024, 'PSD'))
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     psdSessions.clear()
     psdSessions.set(sessionId, psd)

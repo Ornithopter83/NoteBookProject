@@ -87,8 +87,12 @@ function preflight(input: Uint8Array, limits: PsdBridgeLimits): void {
   const height = view.getUint32(14, false);
   const width = view.getUint32(18, false);
   const depth = view.getUint16(22, false);
-  if (channels === 0 || channels > 16 || width === 0 || height === 0 || width > 30_000 || height > 30_000 || ![1, 8, 16, 32].includes(depth)) {
+  const colorMode = view.getUint16(24, false);
+  if (channels === 0 || channels > 56 || width === 0 || height === 0 || width > 30_000 || height > 30_000 || colorMode > 9) {
     throw new PsdBridgeError('PSD header contains invalid dimensions, channel count, or bit depth.', 'INVALID_PSD');
+  }
+  if (![8, 16, 32].includes(depth)) {
+    throw new PsdBridgeError(`PSD bit depth ${depth} is unsupported; only 8-, 16-, and 32-bit documents can be read.`, 'UNSUPPORTED_FORMAT');
   }
   if (width * height > limits.maxCanvasPixels) throw new PsdBridgeError('PSD canvas exceeds the configured pixel limit.', 'INPUT_LIMIT');
   const estimatedDecodedBytes = width * height * Math.max(channels, 4) * Math.ceil(depth / 8);
@@ -205,13 +209,32 @@ function countLayers(layers: Layer[] | undefined, depth: number, limits: PsdBrid
   }
 }
 
+function estimateOutputBytes(layers: Layer[] | undefined, width: number, height: number, sourceBytes: number): number {
+  // The source size covers metadata whose serialized size is not represented in the layer model.
+  // Add decoded pixels and record overhead conservatively before the writer allocates its buffer.
+  let estimate = sourceBytes + width * height * 4 + 64 * 1024;
+  const visit = (items: Layer[] | undefined): void => {
+    for (const layer of items ?? []) {
+      estimate += 1024;
+      if (layer.imageData) estimate += layer.imageData.data.byteLength;
+      else if (layer.rawData) {
+        for (const channel of layer.rawData.channels) estimate += channel.data?.byteLength ?? 0;
+      }
+      if (!Number.isSafeInteger(estimate)) return;
+      visit(layer.children);
+    }
+  };
+  visit(layers);
+  return estimate;
+}
+
 /** Editable PSD wrapper. Pixel buffers returned by getLayerPixels/readTree are copies. */
 export class PsdBridgeDocument {
   readonly width: number;
   readonly height: number;
   readonly bitDepth: number;
   readonly warnings: readonly PsdBridgeWarning[];
-  private constructor(private readonly psd: Psd, private readonly limits: PsdBridgeLimits) {
+  private constructor(private readonly psd: Psd, private readonly limits: PsdBridgeLimits, private readonly sourceByteLength: number) {
     this.width = psd.width;
     this.height = psd.height;
     this.bitDepth = psd.bitsPerChannel ?? 8;
@@ -237,7 +260,7 @@ export class PsdBridgeDocument {
       throw new PsdBridgeError(`Could not decode PSD: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_PSD');
     }
     countLayers(psd.children, 0, limits, { count: 0 });
-    return new PsdBridgeDocument(psd, limits);
+    return new PsdBridgeDocument(psd, limits, input.byteLength);
   }
 
   readTree(): PsdLayerView[] {
@@ -288,6 +311,9 @@ export class PsdBridgeDocument {
   save(): Buffer {
     if (this.bitDepth !== 8) {
       throw new PsdBridgeError(`Saving ${this.bitDepth}-bit PSDs is unsupported because ag-psd only writes 8-bit documents.`, 'UNSUPPORTED_FORMAT');
+    }
+    if (estimateOutputBytes(this.psd.children, this.width, this.height, this.sourceByteLength) > this.limits.maxFileBytes) {
+      throw new PsdBridgeError('Estimated PSD output exceeds the configured file size limit; encoding was stopped before allocating the output buffer.', 'OUTPUT_LIMIT');
     }
     let output: Buffer;
     try {

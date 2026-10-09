@@ -92,6 +92,56 @@ test('rejects malformed files and configured size or layer-limit violations', ()
   assert.throws(() => openPsd(fixture(), { maxLayers: 1 }), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INPUT_LIMIT');
 });
 
+test('rejects damaged headers, truncated sections, impossible dimensions, and unsupported bit depths before decoding', () => {
+  const valid = fixture();
+  for (const length of [0, 12, 25, 30, 37, Math.floor(valid.length / 2)]) {
+    assert.throws(() => openPsd(valid.subarray(0, length)), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INVALID_PSD');
+  }
+
+  const badSignature = new Uint8Array(valid);
+  badSignature[0] = 0;
+  assert.throws(() => openPsd(badSignature), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INVALID_PSD');
+
+  const impossibleSize = new Uint8Array(valid);
+  new DataView(impossibleSize.buffer).setUint32(18, 0xffffffff, false);
+  assert.throws(() => openPsd(impossibleSize), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INVALID_PSD');
+
+  const tooLarge = new Uint8Array(valid);
+  const tooLargeView = new DataView(tooLarge.buffer);
+  tooLargeView.setUint32(14, 20_000, false);
+  tooLargeView.setUint32(18, 20_000, false);
+  assert.throws(() => openPsd(tooLarge), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INPUT_LIMIT');
+
+  const unsupportedDepth = new Uint8Array(valid);
+  new DataView(unsupportedDepth.buffer).setUint16(22, 24, false);
+  assert.throws(() => openPsd(unsupportedDepth), (error: unknown) => error instanceof PsdBridgeError && error.code === 'UNSUPPORTED_FORMAT');
+});
+
+test('enforces decoded memory and pre-encoding output size limits', () => {
+  assert.throws(
+    () => openPsd(fixture(), { maxDecodedBytes: 8 }),
+    (error: unknown) => error instanceof PsdBridgeError && error.code === 'INPUT_LIMIT',
+  );
+  const document = openPsd(fixture(), { maxFileBytes: 32 * 1024 });
+  assert.throws(() => document.save(), (error: unknown) => error instanceof PsdBridgeError && error.code === 'OUTPUT_LIMIT');
+});
+
+test('counts layers across the complete hierarchy and retains the ordinary multi-layer round trip', () => {
+  const psd: Psd = {
+    width: 2,
+    height: 2,
+    children: Array.from({ length: 12 }, (_, index) => ({
+      name: `레이어 ${index}`,
+      imageData: { data: new Uint8ClampedArray(originalPixels), width: 2, height: 2 },
+    })),
+  };
+  const bytes = writePsdBuffer(psd);
+  assert.throws(() => openPsd(bytes, { maxLayers: 10 }), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INPUT_LIMIT');
+  const opened = openPsd(bytes);
+  assert.equal(opened.readTree().length, 12);
+  assert.deepEqual(openPsd(opened.save()).getLayerPixels('11')?.data, originalPixels);
+});
+
 test('validates layer edits and unknown layer identifiers', () => {
   const document = openPsd(fixture());
   assert.throws(() => document.editLayer('0.0', { opacity: 1.5 }), (error: unknown) => error instanceof PsdBridgeError && error.code === 'INVALID_EDIT');
