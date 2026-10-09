@@ -47,7 +47,10 @@ test('preserves vector path data and group transform metadata during validation'
   const group = { id: 'group-1', name: '그룹', nodeIds: [path.id], x: 3.25, y: 4.5, width: 20.5, height: 24.75, rotation: 17.5, visible: true, locked: false }
   const validated = validateDocument({ ...createDocument(), nodes: [path], groups: [group] })
   assert.deepEqual(validated.nodes[0].pathSegments, path.pathSegments)
+  assert.equal(validated.groups[0].x, 3.25)
+  assert.equal(validated.groups[0].y, 4.5)
   assert.equal(validated.groups[0].width, 20.5)
+  assert.equal(validated.groups[0].height, 24.75)
   assert.equal(validated.groups[0].rotation, 17.5)
   assert.throws(() => validateDocument({ ...createDocument(), nodes: [{ ...path, pathSegments: [{ op: 'C', points: [[1, 2]] }] }] }), /벡터 경로 데이터/)
 })

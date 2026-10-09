@@ -18,6 +18,7 @@ let socket
 let nextId = 0
 const pending = new Map()
 const browserErrors = []
+let draggedGroupPosition
 
 function log(message) {
   console.log(`[m3-editor-gui-smoke] ${message}`)
@@ -107,6 +108,19 @@ async function waitFor(expression, description, timeoutMs = 10000) {
 async function click(expression, description) {
   const clicked = await evaluate(`(() => { const element = ${expression}; if (!element || element.disabled) return false; element.click(); return true })()`)
   assert.equal(clicked, true, `Could not click ${description}`)
+}
+
+async function dragCanvasObject(selector, dx, dy, steps = 4) {
+  const start = await evaluate(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); const matrix = document.querySelector('.artboard')?.getScreenCTM(); if (!element || !matrix) return null; const rect = element.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, scaleX: matrix.a, scaleY: matrix.d } })()`)
+  assert.ok(start, `Could not find drag target ${selector}`)
+  const screenDx = dx * start.scaleX
+  const screenDy = dy * start.scaleY
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y })
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1 })
+  for (let step = 1; step <= steps; step++) {
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x + screenDx * step / steps, y: start.y + screenDy * step / steps, button: 'left', buttons: 1 })
+  }
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: start.x + screenDx, y: start.y + screenDy, button: 'left', buttons: 0, clickCount: 1 })
 }
 
 function closeSocket() {
@@ -217,7 +231,37 @@ async function main() {
       assert.equal(await evaluate(`Number(document.querySelector('[data-testid="group-properties"] input[aria-label="W"]').value)`), 520.5, 'Locked group accepted a transform')
       await click(`document.querySelector('.layer-row[data-group-id] button[title="표시하기"]')`, 'show locked group')
       await waitFor(`document.querySelectorAll('.artboard g[data-node="true"]').length === 2`, 'showing locked group')
+      const lockedGroupPosition = await evaluate(`(() => { const group = document.querySelector('[data-testid="group-properties"]'); const members = Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean); return { x: Number(group.querySelector('input[aria-label="X"]').value), y: Number(group.querySelector('input[aria-label="Y"]').value), members } })()`)
+      await dragCanvasObject('.artboard g[data-node="true"] rect', 12, 6)
+      const afterLockedDrag = await evaluate(`(() => { const group = document.querySelector('[data-testid="group-properties"]'); const members = Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean); return { x: Number(group.querySelector('input[aria-label="X"]').value), y: Number(group.querySelector('input[aria-label="Y"]').value), members } })()`)
+      assert.deepEqual(afterLockedDrag, lockedGroupPosition, 'Dragging a locked group changed its position or members')
       await click(`document.querySelector('.layer-row[data-group-id] button[title="잠금 해제"]')`, 'unlock group')
+      await withStage('Repeated group drag, history, and editable-field shortcuts', async () => {
+        const before = await evaluate(`(() => { const group = document.querySelector('[data-testid="group-properties"]'); const input = group?.querySelector('input[aria-label="X"]'); const members = Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean); return input && members.length === 2 ? { x: Number(input.value), y: Number(group.querySelector('input[aria-label="Y"]').value), members } : null })()`)
+        assert.ok(before, 'Could not read group and member positions before dragging')
+        await dragCanvasObject('.artboard g[data-node="true"] rect', 18, 9)
+        await dragCanvasObject('.artboard g[data-node="true"] rect', -7, 13)
+        await waitFor(`Math.abs(Number(document.querySelector('[data-testid="group-properties"] input[aria-label="X"]').value) - ${before.x + 11}) < 0.01`, 'two group drags updating group X')
+        draggedGroupPosition = await evaluate(`(() => { const group = document.querySelector('[data-testid="group-properties"]'); const members = Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean); return { x: Number(group.querySelector('input[aria-label="X"]').value), y: Number(group.querySelector('input[aria-label="Y"]').value), members } })()`)
+        assert.ok(Math.abs(draggedGroupPosition.x - (before.x + 11)) < 0.01, 'Repeated drag accumulated group X incorrectly')
+        assert.ok(Math.abs(draggedGroupPosition.y - (before.y + 22)) < 0.01, 'Repeated drag accumulated group Y incorrectly')
+        for (let index = 0; index < before.members.length; index++) {
+          assert.equal(draggedGroupPosition.members[index].id, before.members[index].id)
+          assert.ok(Math.abs(draggedGroupPosition.members[index].x - before.members[index].x - 11) < 0.01, 'Group member X did not follow the pointer delta')
+          assert.ok(Math.abs(draggedGroupPosition.members[index].y - before.members[index].y - 22) < 0.01, 'Group member Y did not follow the pointer delta')
+        }
+        await dragCanvasObject('.artboard g[data-node="true"] rect', 0, 0, 1)
+        await click(`document.querySelector('button[title="실행 취소"]')`, 'undo second group drag')
+        await click(`document.querySelector('button[title="실행 취소"]')`, 'undo first group drag')
+        await waitFor(`Math.abs(Number(document.querySelector('[data-testid="group-properties"] input[aria-label="X"]').value) - ${before.x}) < 0.01`, 'undoing both group drags')
+        await click(`document.querySelector('button[title="다시 실행"]')`, 'redo first group drag')
+        await click(`document.querySelector('button[title="다시 실행"]')`, 'redo second group drag')
+        await waitFor(`Math.abs(Number(document.querySelector('[data-testid="group-properties"] input[aria-label="Y"]').value) - ${draggedGroupPosition.y}) < 0.01 && (() => { const members = Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean); return JSON.stringify(members) === ${JSON.stringify(JSON.stringify(draggedGroupPosition.members))} })()`, 'redoing both group drags and member positions')
+        const shortcuts = await evaluate(`(() => { const input = document.querySelector('[data-testid="group-properties"] input[aria-label="X"]'); const status = document.querySelector('.canvas-status').innerText; input.focus(); for (const key of ['z', 's', 'Delete']) input.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: key !== 'Delete', bubbles: true })); return { x: Number(input.value), status, afterStatus: document.querySelector('.canvas-status').innerText, objects: document.querySelectorAll('.artboard g[data-node="true"]').length } })()`)
+        assert.equal(shortcuts.x, draggedGroupPosition.x, 'Ctrl+Z in a field changed document history')
+        assert.equal(shortcuts.afterStatus, shortcuts.status, 'Ctrl+S in a field triggered the document save shortcut')
+        assert.equal(shortcuts.objects, 2, 'Delete in a field removed the selected group members')
+      })
       await click(`Array.from(document.querySelectorAll('.canvas-tools button')).find((button) => button.title === '텍스트 추가')`, 'add text')
       await waitFor(`document.querySelector('textarea[aria-label="텍스트 내용"]')`, 'text properties')
       await evaluate(`(() => { const e = document.querySelector('textarea[aria-label="텍스트 내용"]'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(e, 'M3 GUI 편집 테스트'); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return true })()`)
@@ -240,7 +284,10 @@ async function main() {
       assert.equal(saved.groups.length, 1)
       assert.equal(saved.groups[0].width, 520.5)
       assert.equal(saved.groups[0].rotation, 17.5)
+      assert.equal(saved.groups[0].x, draggedGroupPosition.x)
+      assert.equal(saved.groups[0].y, draggedGroupPosition.y)
       assert.equal(saved.groups[0].nodeIds.length, 2)
+      assert.deepEqual(saved.groups[0].nodeIds.map((id) => { const node = saved.nodes.find((item) => item.id === id); return { id, x: node.x, y: node.y } }).sort((a, b) => a.id.localeCompare(b.id)), [...draggedGroupPosition.members].sort((a, b) => a.id.localeCompare(b.id)), 'Saved group members did not retain their dragged coordinates')
       assert.equal(saved.nodes.find((node) => node.kind === 'text').text, 'M3 GUI 편집 테스트')
 
       const changedAgain = await evaluate(`(() => { const e = document.querySelector('textarea[aria-label="텍스트 내용"]'); if (!e) return false; const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(e, 'Unsaved Change'); e.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
@@ -249,6 +296,8 @@ async function main() {
       await click(`Array.from(document.querySelectorAll('button')).find((button) => button.innerText.includes('열기'))`, 'open document')
       await waitFor(`document.querySelectorAll('.artboard g[data-node="true"]').length === 3`, 'reopened .nbdoc objects')
       assert.equal(await evaluate(`document.querySelectorAll('.layer-row[data-group-id]').length`), 1, 'Group was not restored')
+      const reopenedMembers = await evaluate(`Array.from(document.querySelectorAll('.artboard g[data-node="true"]')).map((element) => { const node = element.querySelector('rect'); return node ? { id: element.dataset.nodeId, x: Number(node.getAttribute('x')), y: Number(node.getAttribute('y')) } : null }).filter(Boolean).filter((member) => ${JSON.stringify(draggedGroupPosition.members.map((member) => member.id))}.includes(member.id))`)
+      assert.deepEqual(reopenedMembers.sort((a, b) => a.id.localeCompare(b.id)), [...draggedGroupPosition.members].sort((a, b) => a.id.localeCompare(b.id)), 'Reopened group members did not retain their dragged coordinates')
       assert.equal(await evaluate(`Array.from(document.querySelectorAll('.artboard text')).some((node) => node.textContent === 'M3 GUI 편집 테스트')`), true, 'Edited Unicode text was not restored')
     })
 

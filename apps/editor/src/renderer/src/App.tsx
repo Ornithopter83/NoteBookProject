@@ -7,6 +7,8 @@ import type { LayerChanges, PsdLayerView } from '@northstar/psd-bridge'
 type Tool = 'select' | 'rect' | 'ellipse' | 'text'
 const palettes = ['#f97352', '#f7b955', '#b5ca74', '#62b7a6', '#6797d3', '#a18ad3', '#ed8ca2', '#252629']
 const makeId = () => `layer-${Math.random().toString(36).slice(2, 9)}`
+const isEditableTarget = (target: EventTarget | null) => target instanceof HTMLElement &&
+  (target.isContentEditable || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)
 
 export default function App() {
   const [document, setDocument] = useState<EditorDocument>(() => createDocument())
@@ -106,10 +108,11 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void save() }
       if (event.key === 'Escape') setTool('select')
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIds.length && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIds.length) {
         const removableIds = selectedIds.filter((id) => {
           const node = document.nodes.find((item) => item.id === id)
           const group = (document.groups ?? []).find((item) => item.nodeIds.includes(id))
@@ -148,9 +151,10 @@ export default function App() {
       setSelectedIds(next); setSelectedId(next.at(-1) ?? null); setSelectedGroupId(null)
       return
     }
-    const ids = selectedIds.includes(node.id) ? selectedIds : [node.id]
-    setSelectedIds(ids); setSelectedId(node.id); setSelectedGroupId(null)
     const group = (document.groups ?? []).find((candidate) => candidate.nodeIds.includes(node.id))
+    const ids = selectedIds.includes(node.id) ? selectedIds : [node.id]
+    if (group) { setSelectedIds([]); setSelectedId(null); setSelectedGroupId(group.id) }
+    else { setSelectedIds(ids); setSelectedId(node.id); setSelectedGroupId(null) }
     const movingIds = group ? group.nodeIds : ids
     if (tool !== 'select' || node.locked || group?.locked || movingIds.some((id) => document.nodes.find((item) => item.id === id)?.locked)) return
     const point = canvasPoint(event)
@@ -162,7 +166,11 @@ export default function App() {
     if (!drag) return
     const point = canvasPoint(event)
     const dx = point.x - drag.x; const dy = point.y - drag.y
-    setDocument((current) => ({ ...current, groups: drag.groupId ? (current.groups ?? []).map((group) => group.id === drag.groupId ? { ...group, x: group.x + dx, y: group.y + dy } : group) : current.groups, nodes: current.nodes.map((node) => {
+    setDocument((current) => ({ ...current, groups: drag.groupId ? (current.groups ?? []).map((group) => {
+      if (group.id !== drag.groupId) return group
+      const original = drag.before.groups?.find((item) => item.id === group.id)
+      return original ? { ...group, x: original.x + dx, y: original.y + dy } : group
+    }) : current.groups, nodes: current.nodes.map((node) => {
       if (!drag.ids.includes(node.id)) return node
       const original = drag.before.nodes.find((item) => item.id === node.id)
       if (!original) return node
@@ -170,7 +178,7 @@ export default function App() {
         if (original.kind !== 'path') return node
         return { ...node, x: original.x + dx, y: original.y - dy, pathSegments: original.pathSegments?.map((segment) => ({ ...segment, points: segment.points.map(([x, y]) => [x + dx, y - dy]) })) }
       }
-      return { ...node, x: Math.round(original.x + dx), y: Math.round(original.y + (node.kind === 'aiText' ? -dy : dy)) }
+      return { ...node, x: original.x + dx, y: original.y + (node.kind === 'aiText' ? -dy : dy) }
     }) }))
   }
   const onNodeUp = () => {
@@ -178,7 +186,7 @@ export default function App() {
     if (!drag) return
     const before = drag.before
     dragRef.current = null
-    if (JSON.stringify(before.nodes) === JSON.stringify(document.nodes)) return
+    if (JSON.stringify(before.nodes) === JSON.stringify(document.nodes) && JSON.stringify(before.groups ?? []) === JSON.stringify(document.groups ?? [])) return
     setHistory((items) => [...items.slice(-49), before]); setFuture([]); setMessage('저장되지 않은 변경 사항')
   }
 
