@@ -76,6 +76,8 @@ call :run_check "M1 GUI smoke" smoke:gui
 call :run_check "M2 PSD GUI smoke" smoke:psd-gui
 call :run_check "M2 AI GUI smoke" smoke:ai-gui
 call :run_check "M3 GUI smoke" smoke:m3-gui
+call :run_check "M5 format GUI smoke" smoke:m5-gui
+call :run_check "M6 export GUI smoke" smoke:m6-gui
 
 popd
 popd

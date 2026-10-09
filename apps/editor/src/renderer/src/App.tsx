@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
-import { AlignLeft, ArrowDown, ArrowUp, ChevronDown, Circle, Eye, EyeOff, FileImage, FilePlus2, Grid2X2, ImagePlus, Layers, LockKeyhole, MousePointer2, Redo2, Save, Square, Type, Undo2, X } from 'lucide-react'
+import { AlignLeft, ArrowDown, ArrowUp, ChevronDown, Circle, Download, Eye, EyeOff, FileImage, FilePlus2, Grid2X2, ImagePlus, Layers, LockKeyhole, MousePointer2, Redo2, Save, Square, Type, Undo2, X } from 'lucide-react'
 import { cloneDocument, createDocument, isValidPathSegments, type EditorDocument, type EditorNode, type NodeGroup, type NodeKind } from '../../shared/document'
 import type { PsdEditorDocument } from '../../preload'
 import type { LayerChanges, PsdLayerView } from '@northstar/psd-bridge'
@@ -20,6 +20,7 @@ export default function App() {
   const [history, setHistory] = useState<EditorDocument[]>([])
   const [future, setFuture] = useState<EditorDocument[]>([])
   const [message, setMessage] = useState('모든 변경 사항이 저장되었습니다')
+  const [exportOpen, setExportOpen] = useState(false)
   const [psd, setPsd] = useState<PsdEditorDocument | null>(null)
   const [psdEdits, setPsdEdits] = useState<Record<string, LayerChanges>>({})
   const [selectedPsdId, setSelectedPsdId] = useState<string | null>(null)
@@ -99,6 +100,44 @@ export default function App() {
         if (result) { setDocument({ ...document, name: result.document.name }); setMessage(aiImport ? 'AI 변환 문서를 .nbdoc로 저장했습니다' : '모든 변경 사항이 저장되었습니다') }
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '저장에 실패했습니다') }
+  }
+  const exportFile = async (format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd') => {
+    setExportOpen(false)
+    if (format === 'psd') {
+      const sourceWarnings = psd?.warnings.filter((warning) => !warning.message.startsWith('Layer edits do not regenerate the flattened composite preview.')) ?? []
+      const warningDetails = sourceWarnings.length ? `\n\n원본 PSD 확인 사항:\n${sourceWarnings.slice(0, 4).map((warning) => `• ${warning.message}`).join('\n')}${sourceWarnings.length > 4 ? `\n• 외 ${sourceWarnings.length - 4}개 항목` : ''}` : ''
+      if (!window.confirm(`PSD는 현재 캔버스를 8비트 RGB 단일 병합 레이어로 내보냅니다. 편집 가능한 레이어는 보존되지 않습니다.${warningDetails}\n\n계속할까요?`)) return
+    }
+    if (format === 'pdf' && !window.confirm('PDF는 캔버스 모양을 유지하는 평면 이미지로 내보냅니다. 계속할까요?')) return
+    if (format === 'svg' && !psd && document.nodes.some((node) => node.kind === 'text' || node.kind === 'aiText') &&
+      !window.confirm('SVG 텍스트는 편집 가능한 글자로 보존됩니다. 글꼴 파일은 포함하지 않으므로 다른 컴퓨터에서 글꼴이 대체될 수 있습니다. 계속할까요?')) return
+    try {
+      const width = psd?.width ?? document.width; const height = psd?.height ?? document.height
+      const svg = psd ? createPsdSvg(psd.layers, psd.width, psd.height, psdEdits) : createExportSvg(svgRef.current, document.width, document.height, document.background)
+      if (format === 'svg') {
+        const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
+        if (result) setMessage(`SVG를 내보냈습니다 · ${result.filePath}`)
+        return
+      }
+      const image = new Image()
+      const svgUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }))
+      try { image.src = svgUrl; await image.decode() } finally { URL.revokeObjectURL(svgUrl) }
+      const canvas = window.document.createElement('canvas'); canvas.width = width; canvas.height = height
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('캔버스를 만들지 못했습니다.')
+      if (format === 'jpeg' || format === 'pdf' || format === 'psd') { context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height) }
+      context.drawImage(image, 0, 0, width, height)
+      if (format === 'png' || format === 'jpeg') {
+        const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error('이미지 인코딩에 실패했습니다.')), format === 'png' ? 'image/png' : 'image/jpeg', 0.92))
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        const result = await window.northstar.exportFile({ format, width, height, image: bytes, name: psd?.name ?? document.name })
+        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${result.filePath}`)
+      } else {
+        const pixels = context.getImageData(0, 0, width, height).data
+        const result = await window.northstar.exportFile({ format, width, height, pixels: new Uint8Array(pixels), name: psd?.name ?? document.name })
+        if (result) setMessage(`${format.toUpperCase()}를 내보냈습니다 · ${result.filePath}`)
+      }
+    } catch (error) { setMessage(error instanceof Error ? error.message : '내보내기에 실패했습니다') }
   }
   const open = async () => {
     try {
@@ -293,7 +332,7 @@ export default function App() {
     <header className="topbar">
       <div className="brand"><div className="brand-mark">N</div><span>northstar</span><span className="brand-divider" /><span className="workspace-label">워크스페이스</span></div>
       <div className="document-tab"><span className="doc-dot" />{document.name}<span className="tab-close"><X size={13} /></span></div>
-      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> 저장</button><button className="avatar">J</button></div>
+      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> {psd ? 'PSD 사본 저장' : '.nbdoc 저장'}</button><div style={{ position: 'relative' }}><button className="button subtle" aria-haspopup="menu" aria-expanded={exportOpen} onClick={() => setExportOpen((open) => !open)}><Download size={15} /> 내보내기</button>{exportOpen && <div className="export-menu" role="menu" aria-label="파일 형식 선택" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 20, minWidth: 210, padding: 6, border: '1px solid #35363a', borderRadius: 8, background: '#1b1c1f', boxShadow: '0 8px 24px #0008' }}>{([['png', 'PNG 이미지'], ['jpeg', 'JPEG 이미지'], ['psd', 'PSD 평면 문서'], ['svg', 'Illustrator용 SVG'], ['pdf', 'PDF 문서 · 평면 이미지']] as const).map(([format, label]) => <button role="menuitem" key={format} style={{ display: 'block', width: '100%', padding: '9px 10px', border: 0, borderRadius: 5, background: 'transparent', color: '#eee', textAlign: 'left', cursor: 'pointer' }} onClick={() => void exportFile(format)}>{label}</button>)}</div>}</div><button className="avatar">J</button></div>
     </header>
     <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{psd?.name ?? document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status" role="status" aria-live="polite"><span className="saved-dot" />{message}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : aiImport ? `AI 가져오기 · PDF ${aiImport.pdfVersion}` : 'NBDOC · RGB · 8비트'}</div></div>
     <div className="workspace">
@@ -360,6 +399,31 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
 
 function objectTop(node: EditorNode, documentHeight: number): number {
   return node.kind === 'path' || node.kind === 'aiText' ? documentHeight - node.y - node.height : node.y
+}
+
+function createExportSvg(source: SVGSVGElement | null, width: number, height: number, background: string): string {
+  if (!source) throw new Error('내보낼 캔버스를 찾지 못했습니다.')
+  const svg = source.cloneNode(true) as SVGSVGElement
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  svg.setAttribute('width', String(width)); svg.setAttribute('height', String(height)); svg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+  const backdrop = window.document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+  backdrop.setAttribute('width', String(width)); backdrop.setAttribute('height', String(height)); backdrop.setAttribute('fill', background)
+  svg.insertBefore(backdrop, svg.firstChild)
+  svg.querySelectorAll('.selection-outline,[data-testid="group-selection-outline"]').forEach((element) => element.remove())
+  if (!svg.querySelector('[data-node]')) svg.querySelectorAll('g').forEach((element) => element.remove())
+  return new XMLSerializer().serializeToString(svg)
+}
+
+function createPsdSvg(layers: PsdLayerView[], width: number, height: number, edits: Record<string, LayerChanges>): string {
+  const serialize = (items: PsdLayerView[], parentVisible = true): string => items.map((original) => {
+    const layer = { ...original, ...edits[original.id] }
+    if (!parentVisible || !layer.visible) return ''
+    const image = layer.kind === 'raster' ? pixelDataUrl(layer) : undefined
+    const pixels = layer.pixels
+    const item = image && pixels ? `<image href="${image}" x="${layer.left}" y="${layer.top}" width="${pixels.width}" height="${pixels.height}" opacity="${layer.opacity}"/>` : ''
+    return `${item}${layer.children ? serialize(layer.children, true) : ''}`
+  }).reverse().join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${serialize(layers)}</svg>`
 }
 
 function getObjectsBounds(nodes: EditorNode[], documentHeight: number): Pick<NodeGroup, 'x' | 'y' | 'width' | 'height'> {

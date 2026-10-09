@@ -19,6 +19,8 @@
     "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs",
     "smoke:ai-gui": "node scripts/m2-ai-gui-smoke.cjs",
     "smoke:m3-gui": "node scripts/m3-editor-gui-smoke.cjs",
+    "smoke:m5-gui": "node scripts/m5-format-gui-smoke.cjs",
+    "smoke:m6-gui": "node scripts/m6-export-gui-smoke.cjs",
     "smoke:packaged-gui": "node scripts/m3-editor-gui-smoke.cjs"
   },
   "dependencies": {

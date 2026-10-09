@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { deflateSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
 import { openPsd, type LayerChanges, type PsdLayerView } from '@northstar/psd-bridge'
@@ -19,6 +20,70 @@ const psdSessions = new Map<string, ReturnType<typeof openPsd>>()
 const MAX_AI_BYTES = 64 * 1024 * 1024
 const MAX_PSD_BYTES = 512 * 1024 * 1024
 const MAX_NBDOC_BYTES = 64 * 1024 * 1024
+let smokeOpenFiles: string[] | undefined
+let smokeOpenFileIndex = 0
+
+function makeFlatPsd(width: number, height: number, rgba: Uint8Array): Buffer {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 30000 || height > 30000 || rgba.byteLength !== width * height * 4) throw new Error('PSD 픽셀 크기가 유효하지 않습니다.')
+  const header = Buffer.alloc(26)
+  header.write('8BPS', 0, 'ascii'); header.writeUInt16BE(1, 4); header.writeUInt16BE(3, 12); header.writeUInt32BE(height, 14); header.writeUInt32BE(width, 18); header.writeUInt16BE(8, 22); header.writeUInt16BE(3, 24)
+  const pixelCount = width * height
+  const planes = Array.from({ length: 4 }, (_, channel) => {
+    const plane = Buffer.alloc(pixelCount)
+    for (let pixel = 0; pixel < pixelCount; pixel++) plane[pixel] = rgba[pixel * 4 + channel]
+    return plane
+  })
+  const layerName = Buffer.from('Flattened Artwork', 'ascii')
+  const pascalName = Buffer.concat([Buffer.from([layerName.length]), layerName])
+  const paddedName = Buffer.concat([pascalName, Buffer.alloc((4 - (pascalName.length % 4)) % 4)])
+  const emptyExtra = Buffer.alloc(8)
+  const extra = Buffer.concat([emptyExtra, paddedName])
+  const layerRecord = Buffer.alloc(42)
+  layerRecord.writeInt32BE(0, 0); layerRecord.writeInt32BE(0, 4); layerRecord.writeInt32BE(height, 8); layerRecord.writeInt32BE(width, 12); layerRecord.writeUInt16BE(4, 16)
+  for (let channel = 0; channel < 4; channel++) { const offset = 18 + channel * 6; layerRecord.writeInt16BE(channel === 3 ? -1 : channel, offset); layerRecord.writeUInt32BE(pixelCount + 2, offset + 2) }
+  const blend = Buffer.alloc(12); blend.write('8BIM', 0, 'ascii'); blend.write('norm', 4, 'ascii'); blend[8] = 255
+  const extraLength = Buffer.alloc(4); extraLength.writeUInt32BE(extra.length)
+  const record = Buffer.concat([layerRecord, blend, extraLength, extra])
+  const layerChannels = planes.map((plane) => Buffer.concat([Buffer.alloc(2), plane]))
+  const layerInfoBody = Buffer.concat([Buffer.from([0, 1]), record, ...layerChannels])
+  const layerInfo = Buffer.concat([layerInfoBody, layerInfoBody.length % 2 ? Buffer.alloc(1) : Buffer.alloc(0)])
+  const layerInfoLength = Buffer.alloc(4); layerInfoLength.writeUInt32BE(layerInfo.length)
+  const globalMaskLength = Buffer.alloc(4)
+  const layerMaskBody = Buffer.concat([layerInfoLength, layerInfo, globalMaskLength])
+  const colorModeAndResources = Buffer.alloc(8)
+  const layerMaskLength = Buffer.alloc(4); layerMaskLength.writeUInt32BE(layerMaskBody.length)
+  const compositeChannels: Buffer[] = []
+  for (let channel = 0; channel < 3; channel++) {
+    const plane = Buffer.alloc(pixelCount)
+    for (let pixel = 0; pixel < pixelCount; pixel++) { const alpha = planes[3][pixel] / 255; plane[pixel] = Math.round(planes[channel][pixel] * alpha + 255 * (1 - alpha)) }
+    compositeChannels.push(plane)
+  }
+  return Buffer.concat([header, colorModeAndResources, layerMaskLength, layerMaskBody, Buffer.alloc(2), ...compositeChannels])
+}
+
+function makePdf(width: number, height: number, rgba: Uint8Array): Buffer {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 30000 || height > 30000 || rgba.byteLength !== width * height * 4) throw new Error('PDF 픽셀 크기가 유효하지 않습니다.')
+  const rgb = Buffer.alloc(width * height * 3)
+  for (let p = 0; p < width * height; p++) {
+    const a = rgba[p * 4 + 3] / 255
+    for (let c = 0; c < 3; c++) rgb[p * 3 + c] = Math.round(rgba[p * 4 + c] * a + 255 * (1 - a))
+  }
+  const image = deflateSync(rgb)
+  const content = Buffer.from(`q ${width} 0 0 ${height} 0 0 cm /Im0 Do Q\n`)
+  const objects = [
+    Buffer.from('<< /Type /Catalog /Pages 2 0 R >>'),
+    Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
+    Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`),
+    Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length ${image.length} >>\nstream\n`), image, Buffer.from('\nendstream')]),
+    Buffer.concat([Buffer.from(`<< /Length ${content.length} >>\nstream\n`), content, Buffer.from('endstream')])
+  ]
+  const chunks: Buffer[] = [Buffer.from('%PDF-1.4\n%âãÏÓ\n')]
+  const offsets = [0]
+  for (let i = 0; i < objects.length; i++) { offsets.push(Buffer.concat(chunks).length); chunks.push(Buffer.from(`${i + 1} 0 obj\n`), objects[i], Buffer.from('\nendobj\n')) }
+  const xrefOffset = Buffer.concat(chunks).length
+  chunks.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`))
+  return Buffer.concat(chunks)
+}
 
 function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
   return tree.map((layer) => ({
@@ -118,7 +183,22 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
 })
 
 ipcMain.handle('document:open', async () => {
-  let filePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? (activeDocumentPath ?? process.env.NORTHSTAR_GUI_SMOKE_AI_FILE ?? process.env.NORTHSTAR_GUI_SMOKE_FILE) : undefined
+  let filePath: string | undefined
+  if (process.env.NORTHSTAR_GUI_SMOKE === '1') {
+    const openFilesJson = process.env.NORTHSTAR_GUI_SMOKE_OPEN_FILES
+    if (openFilesJson) {
+      try {
+        smokeOpenFiles ??= JSON.parse(openFilesJson)
+      } catch {
+        throw new Error('GUI smoke open-file list is not valid JSON.')
+      }
+      if (!Array.isArray(smokeOpenFiles) || smokeOpenFiles.some((item) => typeof item !== 'string')) {
+        throw new Error('GUI smoke open-file list must be an array of paths.')
+      }
+      filePath = smokeOpenFiles[smokeOpenFileIndex++]
+    }
+    filePath ??= process.env.NORTHSTAR_GUI_SMOKE_OPEN_FILE ?? activeDocumentPath ?? process.env.NORTHSTAR_GUI_SMOKE_AI_FILE ?? process.env.NORTHSTAR_GUI_SMOKE_FILE
+  }
   if (!filePath) {
     const options: OpenDialogOptions = { title: '문서 열기', properties: ['openFile'], filters: [{ name: '지원 문서', extensions: ['nbdoc', 'psd', 'ai'] }, { name: 'Illustrator 문서', extensions: ['ai'] }, { name: 'Photoshop 문서', extensions: ['psd'] }, { name: 'Northstar 문서', extensions: ['nbdoc'] }] }
     const result = await dialog.showOpenDialog(options)
@@ -228,6 +308,40 @@ ipcMain.handle('image:import', async () => {
   const mime = extension === 'jpg' ? 'jpeg' : extension
   const bytes = await readFile(filePath)
   return `data:image/${mime};base64,${bytes.toString('base64')}`
+})
+
+ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd'; width: number; height: number; svg?: string; pixels?: Uint8Array; image?: Uint8Array; name: string }) => {
+  const formats = {
+    png: { extension: 'png', label: 'PNG 이미지' }, jpeg: { extension: 'jpg', label: 'JPEG 이미지' },
+    svg: { extension: 'svg', label: 'SVG 벡터' }, pdf: { extension: 'pdf', label: 'PDF 문서' }, psd: { extension: 'psd', label: '평면 Photoshop 문서' }
+  } as const
+  const spec = formats[payload?.format]
+  if (!spec) throw new Error('지원하지 않는 내보내기 형식입니다.')
+  const sourcePath = activePsdSourcePath ?? activeAiSourcePath ?? activeDocumentPath
+  const safeName = (typeof payload.name === 'string' ? payload.name : 'Untitled').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') || 'Untitled'
+  const smokePath = process.env.NORTHSTAR_GUI_SMOKE === '1' ? process.env[`NORTHSTAR_GUI_SMOKE_EXPORT_${payload.format.toUpperCase()}`] : undefined
+  const result = smokePath ? { canceled: false, filePath: smokePath } : await dialog.showSaveDialog({
+    title: `${spec.label} 내보내기`, defaultPath: `${safeName}.${spec.extension}`,
+    filters: [{ name: spec.label, extensions: [spec.extension] }]
+  })
+  if (result.canceled || !result.filePath) return null
+  let destination = path.resolve(result.filePath)
+  if (path.extname(destination).toLowerCase() !== `.${spec.extension}`) destination += `.${spec.extension}`
+  if (sourcePath && await isSameFileOrPath(sourcePath, destination)) throw new Error('열어 둔 원본 파일은 덮어쓸 수 없습니다. 다른 경로로 내보내 주세요.')
+  const width = payload.width; const height = payload.height
+  let output: Buffer
+  if (payload.format === 'svg') {
+    if (typeof payload.svg !== 'string' || !payload.svg.trim().startsWith('<svg')) throw new Error('SVG 내보내기 데이터가 유효하지 않습니다.')
+    output = Buffer.from(payload.svg, 'utf8')
+  } else if (payload.format === 'png' || payload.format === 'jpeg') {
+    if (!(payload.image instanceof Uint8Array) || payload.image.byteLength < 8) throw new Error('이미지 데이터가 없습니다.')
+    output = Buffer.from(payload.image)
+  } else {
+    if (!(payload.pixels instanceof Uint8Array)) throw new Error('픽셀 데이터가 없습니다.')
+    output = payload.format === 'psd' ? makeFlatPsd(width, height, payload.pixels) : makePdf(width, height, payload.pixels)
+  }
+  await writeFile(destination, output)
+  return { filePath: destination }
 })
 
 void app.whenReady().then(() => {
