@@ -1,6 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
-import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import os from 'node:os'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
@@ -20,6 +23,7 @@ const psdSessions = new Map<string, ReturnType<typeof openPsd>>()
 const MAX_AI_BYTES = 64 * 1024 * 1024
 const MAX_PSD_BYTES = 512 * 1024 * 1024
 const MAX_NBDOC_BYTES = 64 * 1024 * 1024
+const ILLUSTRATOR_AUTOMATION_TIMEOUT_MS = 120_000
 let smokeOpenFiles: string[] | undefined
 let smokeOpenFileIndex = 0
 
@@ -83,6 +87,75 @@ function makePdf(width: number, height: number, rgba: Uint8Array): Buffer {
   const xrefOffset = Buffer.concat(chunks).length
   chunks.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`))
   return Buffer.concat(chunks)
+}
+
+async function saveNativeIllustratorFile(svg: string, destination: string): Promise<void> {
+  if (process.platform !== 'win32') throw new Error('Illustrator AI 자동 저장은 Windows에 설치된 Adobe Illustrator가 필요합니다. SVG 또는 PDF로 내보내 주세요.')
+  if (!svg.trim().startsWith('<svg')) throw new Error('Illustrator에 전달할 SVG 데이터가 유효하지 않습니다.')
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'northstar-ai-export-'))
+  const tempSvg = path.join(tempDir, 'artwork.svg')
+  const tempJsx = path.join(tempDir, 'save-and-reopen.jsx')
+  const tempAi = path.join(tempDir, 'artwork.ai')
+  const stagedAi = path.join(path.dirname(destination), `.${path.basename(destination, '.ai')}-${randomUUID()}.tmp.ai`)
+  try {
+    await writeFile(tempSvg, svg, 'utf8')
+    const jsxPath = JSON.stringify(tempSvg).replace(/[\u0080-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    const aiPath = JSON.stringify(tempAi).replace(/[\u0080-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    const jsx = `var sourceDoc; var verifyDoc; try { sourceDoc = app.open(new File(${jsxPath})); var saveOptions = new IllustratorSaveOptions(); saveOptions.pdfCompatible = true; sourceDoc.saveAs(new File(${aiPath}), saveOptions); sourceDoc.close(SaveOptions.DONOTSAVECHANGES); sourceDoc = null; verifyDoc = app.open(new File(${aiPath})); if (!verifyDoc) throw new Error("Saved AI could not be reopened"); verifyDoc.close(SaveOptions.DONOTSAVECHANGES); verifyDoc = null; "OK"; } catch (e) { try { if (verifyDoc) verifyDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {} try { if (sourceDoc) sourceDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {} throw e; }`
+    await writeFile(tempJsx, jsx, 'ascii')
+    const ps = `$ErrorActionPreference = 'Stop'; try { $app = New-Object -ComObject Illustrator.Application } catch { [Console]::Error.WriteLine('NO_ILLUSTRATOR: ' + $_.Exception.Message); exit 24 }; try { $result = $app.DoJavaScriptFile($env:NORTHSTAR_ILLUSTRATOR_SCRIPT); if ($result -ne 'OK') { throw "Illustrator scripting failed: $result" } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 23 }`
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64')
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, NORTHSTAR_ILLUSTRATOR_SCRIPT: tempJsx }
+      })
+      let stderr = ''
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        if (error) reject(error)
+        else resolve()
+      }
+      const timeout = setTimeout(() => {
+        child.kill()
+        finish(new Error(`ILLUSTRATOR_TIMEOUT: ${ILLUSTRATOR_AUTOMATION_TIMEOUT_MS / 1000}초 안에 Illustrator 자동화가 끝나지 않았습니다.`))
+      }, ILLUSTRATOR_AUTOMATION_TIMEOUT_MS)
+      child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8192) })
+      child.once('error', (error) => finish(new Error(`AUTOMATION_HOST_UNAVAILABLE: ${error.message}`)))
+      child.once('close', (code) => {
+        if (code === 0) return finish()
+        const detail = stderr.trim() || `PowerShell exited with code ${code}`
+        if (/user\s*cancel|cancelled|canceled|operation canceled/i.test(detail)) return finish(new Error(`ILLUSTRATOR_CANCELLED: ${detail}`))
+        finish(new Error(detail))
+      })
+    })
+    const saved = await readFile(tempAi)
+    const report = inspectAi(saved)
+    if (!report.compatible || report.status !== 'pdf-compatible-ai') throw new Error('Illustrator가 만든 파일이 PDF 호환 네이티브 AI 형식인지 확인할 수 없습니다.')
+    await writeFile(stagedAi, saved, { flag: 'wx' })
+    await rename(stagedAi, destination)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (detail.includes('NO_ILLUSTRATOR:')) {
+      throw new Error(`Adobe Illustrator가 설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다. .ai 파일은 생성되지 않았습니다. Illustrator 설치 상태를 확인하거나 SVG/PDF 내보내기를 사용하세요. (${detail})`)
+    }
+    if (detail.includes('AUTOMATION_HOST_UNAVAILABLE:')) {
+      throw new Error(`Illustrator 자동화를 시작하지 못했습니다. Windows PowerShell과 Adobe Illustrator 설치 상태를 확인하세요. .ai 파일은 생성되지 않았습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+    }
+    if (detail.includes('ILLUSTRATOR_TIMEOUT:')) {
+      throw new Error(`Illustrator 자동화가 시간 초과되어 .ai 파일을 저장하지 않았습니다. Illustrator가 응답하는지 확인한 뒤 다시 시도하거나 SVG/PDF 내보내기를 사용하세요. (${detail})`)
+    }
+    if (detail.includes('ILLUSTRATOR_CANCELLED:')) {
+      throw new Error(`Illustrator 내보내기가 취소되어 .ai 파일을 저장하지 않았습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+    }
+    throw new Error(`Adobe Illustrator가 SVG를 네이티브 .ai로 저장하거나 다시 열지 못했습니다. SVG/PDF 내보내기를 사용할 수 있습니다. (${detail})`)
+  } finally {
+    await Promise.all([rm(tempDir, { recursive: true, force: true }), rm(stagedAi, { force: true })])
+  }
 }
 
 function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
@@ -310,10 +383,10 @@ ipcMain.handle('image:import', async () => {
   return `data:image/${mime};base64,${bytes.toString('base64')}`
 })
 
-ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd'; width: number; height: number; svg?: string; pixels?: Uint8Array; image?: Uint8Array; name: string }) => {
+ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd' | 'ai'; width: number; height: number; svg?: string; pixels?: Uint8Array; image?: Uint8Array; name: string }) => {
   const formats = {
     png: { extension: 'png', label: 'PNG 이미지' }, jpeg: { extension: 'jpg', label: 'JPEG 이미지' },
-    svg: { extension: 'svg', label: 'SVG 벡터' }, pdf: { extension: 'pdf', label: 'PDF 문서' }, psd: { extension: 'psd', label: '평면 Photoshop 문서' }
+    svg: { extension: 'svg', label: 'SVG 벡터' }, pdf: { extension: 'pdf', label: 'PDF 문서' }, psd: { extension: 'psd', label: '평면 Photoshop 문서' }, ai: { extension: 'ai', label: 'Illustrator AI' }
   } as const
   const spec = formats[payload?.format]
   if (!spec) throw new Error('지원하지 않는 내보내기 형식입니다.')
@@ -328,6 +401,11 @@ ipcMain.handle('document:export', async (_event, payload: { format: 'png' | 'jpe
   let destination = path.resolve(result.filePath)
   if (path.extname(destination).toLowerCase() !== `.${spec.extension}`) destination += `.${spec.extension}`
   if (sourcePath && await isSameFileOrPath(sourcePath, destination)) throw new Error('열어 둔 원본 파일은 덮어쓸 수 없습니다. 다른 경로로 내보내 주세요.')
+  if (payload.format === 'ai') {
+    if (typeof payload.svg !== 'string') throw new Error('Illustrator AI 저장용 SVG가 없습니다.')
+    await saveNativeIllustratorFile(payload.svg, destination)
+    return { filePath: destination }
+  }
   const width = payload.width; const height = payload.height
   let output: Buffer
   if (payload.format === 'svg') {

@@ -101,8 +101,9 @@ export default function App() {
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : '저장에 실패했습니다') }
   }
-  const exportFile = async (format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd') => {
+  const exportFile = async (format: 'png' | 'jpeg' | 'svg' | 'pdf' | 'psd' | 'ai') => {
     setExportOpen(false)
+    if (format === 'ai' && !window.confirm('현재 캔버스를 Illustrator에서 열어 네이티브 .ai 파일로 저장합니다. 사진은 포함된 JPEG 래스터 이미지로 유지되며 벡터화되지 않습니다. 계속할까요?')) return
     if (format === 'psd') {
       const sourceWarnings = psd?.warnings.filter((warning) => !warning.message.startsWith('Layer edits do not regenerate the flattened composite preview.')) ?? []
       const warningDetails = sourceWarnings.length ? `\n\n원본 PSD 확인 사항:\n${sourceWarnings.slice(0, 4).map((warning) => `• ${warning.message}`).join('\n')}${sourceWarnings.length > 4 ? `\n• 외 ${sourceWarnings.length - 4}개 항목` : ''}` : ''
@@ -117,6 +118,11 @@ export default function App() {
       if (format === 'svg') {
         const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
         if (result) setMessage(`SVG를 내보냈습니다 · ${result.filePath}`)
+        return
+      }
+      if (format === 'ai') {
+        const result = await window.northstar.exportFile({ format, width, height, svg, name: psd?.name ?? document.name })
+        if (result) setMessage(`Illustrator AI를 저장했습니다 · ${result.filePath}`)
         return
       }
       const image = new Image()
@@ -332,7 +338,7 @@ export default function App() {
     <header className="topbar">
       <div className="brand"><div className="brand-mark">N</div><span>northstar</span><span className="brand-divider" /><span className="workspace-label">워크스페이스</span></div>
       <div className="document-tab"><span className="doc-dot" />{document.name}<span className="tab-close"><X size={13} /></span></div>
-      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> {psd ? 'PSD 사본 저장' : '.nbdoc 저장'}</button><div style={{ position: 'relative' }}><button className="button subtle" aria-haspopup="menu" aria-expanded={exportOpen} onClick={() => setExportOpen((open) => !open)}><Download size={15} /> 내보내기</button>{exportOpen && <div className="export-menu" role="menu" aria-label="파일 형식 선택" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 20, minWidth: 210, padding: 6, border: '1px solid #35363a', borderRadius: 8, background: '#1b1c1f', boxShadow: '0 8px 24px #0008' }}>{([['png', 'PNG 이미지'], ['jpeg', 'JPEG 이미지'], ['psd', 'PSD 평면 문서'], ['svg', 'Illustrator용 SVG'], ['pdf', 'PDF 문서 · 평면 이미지']] as const).map(([format, label]) => <button role="menuitem" key={format} style={{ display: 'block', width: '100%', padding: '9px 10px', border: 0, borderRadius: 5, background: 'transparent', color: '#eee', textAlign: 'left', cursor: 'pointer' }} onClick={() => void exportFile(format)}>{label}</button>)}</div>}</div><button className="avatar">J</button></div>
+      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> {psd ? 'PSD 사본 저장' : '.nbdoc 저장'}</button><div style={{ position: 'relative' }}><button className="button subtle" aria-haspopup="menu" aria-expanded={exportOpen} onClick={() => setExportOpen((open) => !open)}><Download size={15} /> 내보내기</button>{exportOpen && <div className="export-menu" role="menu" aria-label="파일 형식 선택" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 20, minWidth: 210, padding: 6, border: '1px solid #35363a', borderRadius: 8, background: '#1b1c1f', boxShadow: '0 8px 24px #0008' }}>{([['png', 'PNG 이미지'], ['jpeg', 'JPEG 이미지'], ['psd', 'PSD 평면 문서'], ['svg', 'Illustrator용 SVG'], ['pdf', 'PDF 문서 · 평면 이미지'], ['ai', 'Illustrator AI · 사진은 래스터']] as const).map(([format, label]) => <button role="menuitem" key={format} style={{ display: 'block', width: '100%', padding: '9px 10px', border: 0, borderRadius: 5, background: 'transparent', color: '#eee', textAlign: 'left', cursor: 'pointer' }} onClick={() => void exportFile(format)}>{label}</button>)}</div>}</div><button className="avatar">J</button></div>
     </header>
     <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{psd?.name ?? document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status" role="status" aria-live="polite"><span className="saved-dot" />{message}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : aiImport ? `AI 가져오기 · PDF ${aiImport.pdfVersion}` : 'NBDOC · RGB · 8비트'}</div></div>
     <div className="workspace">
