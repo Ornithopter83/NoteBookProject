@@ -14,7 +14,7 @@ const ILLUSTRATOR_RENDERER_GRACE_MS = 10_000
 const appRoot = path.resolve(__dirname, '..')
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-m8-ai-export-'))
 const input = path.join(root, '사진 원본.nbdoc')
-const output = { ai: path.join(root, '사진 결과.ai'), svg: path.join(root, '사진 대안.svg'), pdf: path.join(root, '사진 대안.pdf') }
+const output = { ai: path.join(root, '사진 결과.ai'), aiSvg: path.join(root, 'AI 대안.svg'), svg: path.join(root, '사진 대안.svg'), pdf: path.join(root, '사진 대안.pdf') }
 const image = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAQUCf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQMBAT8Cf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQIBAT8Cf//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEABj8Cf//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8Cf//aAAwDAQACAAMAAAAQ/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k='
 const source = { format: 'northstar-document', version: 1, name: '사진 원본', width: 1440, height: 960, background: '#e8dfcd', groups: [], nodes: [
   { id: 'photo', name: 'JPEG 사진', kind: 'image', x: 110, y: 90, width: 1220, height: 780, fill: '#fff', opacity: 100, rotation: 0, src: `data:image/jpeg;base64,${image}`, visible: true, locked: false }
@@ -52,13 +52,34 @@ async function targetAt(child, port) {
   throw new Error('Timed out waiting for Electron renderer')
 }
 
+function hasIllustratorComRegistration() {
+  if (process.platform !== 'win32') return false
+  const script = "$ErrorActionPreference = 'Stop'; try { $app = New-Object -ComObject Illustrator.Application; if (-not $app) { exit 1 }; [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app); exit 0 } catch { exit 1 }"
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  try {
+    execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore', timeout: 20000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function main() {
   assert.match(execFileSync(require('electron'), ['--version'], { cwd: appRoot, encoding: 'utf8' }).trim(), /^v\d+\./)
+  const illustratorAvailable = hasIllustratorComRegistration()
   const port = await freePort()
+  const electronEnv = { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: input, NORTHSTAR_GUI_SMOKE_OPEN_FILE: input,
+    NORTHSTAR_GUI_SMOKE_EXPORT_AI: output.ai, NORTHSTAR_GUI_SMOKE_EXPORT_AI_SVG: output.aiSvg, NORTHSTAR_GUI_SMOKE_EXPORT_SVG: output.svg, NORTHSTAR_GUI_SMOKE_EXPORT_PDF: output.pdf }
+  if (!illustratorAvailable) {
+    electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE = '1'
+    electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK = 'cancel,svg'
+  } else {
+    delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_UNAVAILABLE
+    delete electronEnv.NORTHSTAR_GUI_SMOKE_ILLUSTRATOR_FALLBACK
+  }
   const child = spawn(require('electron'), [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox', appRoot], {
     cwd: appRoot, windowsHide: true,
-    env: { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: input, NORTHSTAR_GUI_SMOKE_OPEN_FILE: input,
-      NORTHSTAR_GUI_SMOKE_EXPORT_AI: output.ai, NORTHSTAR_GUI_SMOKE_EXPORT_SVG: output.svg, NORTHSTAR_GUI_SMOKE_EXPORT_PDF: output.pdf }
+    env: electronEnv
   })
   const logStream = fs.createWriteStream(logPath, { encoding: 'utf8' }); child.stdout.pipe(logStream); child.stderr.pipe(logStream)
   let socket; let id = 0
@@ -76,6 +97,15 @@ async function main() {
     const cdp = (method, params = {}) => { const requestId = ++id; return new Promise((resolve, reject) => { pending.set(requestId, { resolve, reject }); socket.send(JSON.stringify({ id: requestId, method, params })) }) }
     const evaluate = async (expression) => { const response = await cdp('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }); if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text); return response.result?.value }
     const waitFor = async (expression, description) => { const until = Date.now() + 30000; while (Date.now() < until) { if (await evaluate(`Boolean(${expression})`)) return; await new Promise((resolve) => setTimeout(resolve, 150)) } throw new Error(`Timed out waiting for ${description}`) }
+    const waitForFileAndStatus = async (filePath, successText, description, timeout = 30000) => {
+      const until = Date.now() + timeout
+      while (Date.now() < until) {
+        const status = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
+        if (fs.existsSync(filePath) && status.includes(successText) && status.includes(path.basename(filePath))) return status
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      throw new Error(`Timed out waiting for ${description}: file and matching filename status`)
+    }
     const click = async (expression, label) => assert.equal(await evaluate(`(() => { const e=${expression}; if (!e || e.disabled) return false; e.click(); return true })()`), true, `Could not click ${label}`)
     await cdp('Runtime.enable'); await cdp('Page.enable')
     await waitFor("document.querySelector('[data-testid=editor-artboard]')", 'editor canvas')
@@ -90,50 +120,41 @@ async function main() {
     const initialStatus = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
     const automationTempDirsBefore = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-')))
     await chooseExport('Illustrator AI')
-    const untilAi = Date.now() + ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS
-    let status = initialStatus
-    while (Date.now() < untilAi && !fs.existsSync(output.ai) && status === initialStatus) {
-      await new Promise((resolve) => setTimeout(resolve, 250))
-      status = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
-    }
     const { inspectAi } = await import('@northstar/ai-bridge')
-    if (fs.existsSync(output.ai)) {
+    if (illustratorAvailable) {
+      const status = await waitForFileAndStatus(output.ai, 'Illustrator AI를 저장했습니다', 'native AI save and reopen', ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS)
       const bytes = fs.readFileSync(output.ai); const report = inspectAi(bytes)
       assert.equal(report.status, 'pdf-compatible-ai', 'Output is not PDF-compatible native Illustrator AI')
       assert.equal(report.compatible, true)
       assert.ok(bytes.length > 100, 'AI output is empty')
-      await waitFor("document.querySelector('.canvas-status')?.innerText.includes('Illustrator AI를 저장했습니다')", 'AI save and Illustrator reopen')
+      assert.match(status, /Illustrator AI를 저장했습니다/)
       results.illustrator = 'passed: native AI saveAs, close, reopen, and close verified by Illustrator automation'
       log('RESULT illustrator=PASS native .ai saved with PDF compatibility and reopened by Illustrator automation')
     } else {
-      assert.equal(fs.existsSync(output.ai), false, 'An AI file must not be produced unless native save and reopen succeed')
-      if (/설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다/.test(status)) {
-        assert.match(status, /SVG\/PDF 내보내기/)
-        results.illustrator = 'not-installed: guidance shown and no fake AI created'
-        log('RESULT illustrator=NOT_INSTALLED guidance shown; no fake .ai file created')
-      } else if (/취소/.test(status)) {
-        results.illustrator = `cancelled: ${status}`
-        log(`RESULT illustrator=CANCELLED ${status}`)
-      } else if (/시간 초과|timed out|timeout/i.test(status)) {
-        results.illustrator = `timed-out: ${status}`
-        log(`RESULT illustrator=TIMED_OUT ${status}`)
-      } else if (status !== initialStatus) {
-        results.illustrator = `failed: ${status}`
-        log(`RESULT illustrator=FAILED ${status}`)
-      } else {
-        results.illustrator = `timed-out: no Illustrator result reached the renderer within ${(ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS) / 1000} seconds`
-        log(`RESULT illustrator=TIMED_OUT no renderer result within ${(ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS) / 1000} seconds`)
-      }
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      assert.equal(fs.existsSync(output.ai), false, 'Canceling the SVG alternative created a fake AI file')
+      assert.equal(fs.existsSync(output.aiSvg), false, 'Canceling the SVG alternative created a file')
+      assert.equal(await evaluate("document.querySelector('.canvas-status')?.innerText || ''"), initialStatus, 'Canceling the SVG alternative changed the success status')
+      await chooseExport('Illustrator AI')
+      const status = await waitForFileAndStatus(output.aiSvg, 'SVG를 내보냈습니다', 'SVG alternative and its success status')
+      const svg = fs.readFileSync(output.aiSvg, 'utf8')
+      assert.ok(Buffer.byteLength(svg, 'utf8') > 30, 'SVG alternative is empty')
+      assert.match(svg, /<svg\b/)
+      assert.match(svg, /data:image\/jpeg;base64,/)
+      assert.doesNotMatch(status, /Illustrator AI를 저장했습니다/, 'SVG alternative was reported as an AI save')
+      assert.equal(fs.existsSync(output.ai), false, 'A fake .ai file must never be created')
+      results.illustrator = 'not-installed: test-only cancel created no file or status; test-only SVG alternative created a real file and matching success status; no fake AI created'
+      log(`RESULT illustrator=NOT_INSTALLED test-only cancel and SVG alternative passed (${Buffer.byteLength(svg, 'utf8')} bytes)`)
     }
     const newAutomationTempDirs = fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-') && !automationTempDirsBefore.has(name))
     assert.deepEqual(newAutomationTempDirs, [], 'Illustrator automation temporary directory was left behind')
     await chooseExport('Illustrator용 SVG')
-    await waitFor("document.querySelector('.canvas-status')?.innerText.includes('SVG를 내보냈습니다')", 'SVG fallback')
+    await waitForFileAndStatus(output.svg, 'SVG를 내보냈습니다', 'explicit SVG export')
     const svg = fs.readFileSync(output.svg, 'utf8')
     assert.match(svg, /width="1440"/); assert.match(svg, /height="960"/); assert.match(svg, /#e8dfcd/)
     assert.match(svg, /data:image\/jpeg;base64,/); assert.match(svg, /preserveAspectRatio="xMidYMid slice"/)
     await chooseExport('PDF 문서')
-    await waitFor("document.querySelector('.canvas-status')?.innerText.includes('PDF를 내보냈습니다')", 'PDF fallback')
+    await waitForFileAndStatus(output.pdf, 'PDF를 내보냈습니다', 'PDF export')
     const pdf = fs.readFileSync(output.pdf)
     const pdfText = pdf.toString('latin1')
     assert.match(pdfText, /^%PDF-1\.4/)
