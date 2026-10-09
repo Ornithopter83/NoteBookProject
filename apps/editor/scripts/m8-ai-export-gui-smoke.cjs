@@ -6,6 +6,10 @@ const os = require('node:os')
 const path = require('node:path')
 const net = require('node:net')
 const crypto = require('node:crypto')
+const { inflateSync } = require('node:zlib')
+
+const ILLUSTRATOR_AUTOMATION_TIMEOUT_MS = 120_000
+const ILLUSTRATOR_RENDERER_GRACE_MS = 10_000
 
 const appRoot = path.resolve(__dirname, '..')
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-m8-ai-export-'))
@@ -18,7 +22,16 @@ const source = { format: 'northstar-document', version: 1, name: '사진 원본'
 fs.writeFileSync(input, JSON.stringify(source), 'utf8')
 const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(input)).digest('hex')
 const logPath = path.join(root, 'electron.log')
+const resultPath = process.env.NORTHSTAR_M8_RESULT_FILE
+const originalSvgPath = process.env.NORTHSTAR_M8_SOURCE_SVG
+const originalRenderPath = process.env.NORTHSTAR_M8_SOURCE_RENDER
+const results = { fixture: 'pending', illustrator: 'pending', originalSvg: 'not-provided', cleanup: 'pending' }
 function log(message) { console.log(`[m8-ai-export-gui-smoke] ${message}`) }
+function writeResults() {
+  if (!resultPath) return
+  fs.mkdirSync(path.dirname(path.resolve(resultPath)), { recursive: true })
+  fs.writeFileSync(resultPath, `${JSON.stringify(results, null, 2)}\n`, 'utf8')
+}
 async function freePort() {
   const server = net.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening')
   const port = server.address().port
@@ -72,9 +85,15 @@ async function main() {
       await click("Array.from(document.querySelectorAll('button')).find((e) => e.innerText.includes('내보내기'))", 'export menu')
       await click(`Array.from(document.querySelectorAll('[role=menuitem]')).find((e) => e.innerText.includes(${JSON.stringify(label)}))`, `${label} export`)
     }
+    const initialStatus = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
+    const automationTempDirsBefore = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-')))
     await chooseExport('Illustrator AI')
-    const untilAi = Date.now() + 90000
-    while (Date.now() < untilAi && !fs.existsSync(output.ai) && !(await evaluate("document.querySelector('.canvas-status')?.innerText.includes('설치되어 있지 않거나 COM 자동화를')"))) await new Promise((resolve) => setTimeout(resolve, 250))
+    const untilAi = Date.now() + ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS
+    let status = initialStatus
+    while (Date.now() < untilAi && !fs.existsSync(output.ai) && status === initialStatus) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      status = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
+    }
     const { inspectAi } = await import('@northstar/ai-bridge')
     if (fs.existsSync(output.ai)) {
       const bytes = fs.readFileSync(output.ai); const report = inspectAi(bytes)
@@ -82,14 +101,30 @@ async function main() {
       assert.equal(report.compatible, true)
       assert.ok(bytes.length > 100, 'AI output is empty')
       await waitFor("document.querySelector('.canvas-status')?.innerText.includes('Illustrator AI를 저장했습니다')", 'AI save and Illustrator reopen')
-      log('PASS native .ai saved with PDF compatibility and reopened by Illustrator automation')
+      results.illustrator = 'passed: native AI saveAs, close, reopen, and close verified by Illustrator automation'
+      log('RESULT illustrator=PASS native .ai saved with PDF compatibility and reopened by Illustrator automation')
     } else {
-      const status = await evaluate("document.querySelector('.canvas-status')?.innerText || ''")
-      assert.match(status, /설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다/)
-      assert.match(status, /SVG\/PDF 내보내기/)
-      assert.equal(fs.existsSync(output.ai), false, 'A fake AI file must not be produced when Illustrator is unavailable')
-      log('PASS missing-Illustrator guidance; no fake .ai file was created')
+      assert.equal(fs.existsSync(output.ai), false, 'An AI file must not be produced unless native save and reopen succeed')
+      if (/설치되어 있지 않거나 COM 자동화를 사용할 수 없습니다/.test(status)) {
+        assert.match(status, /SVG\/PDF 내보내기/)
+        results.illustrator = 'not-installed: guidance shown and no fake AI created'
+        log('RESULT illustrator=NOT_INSTALLED guidance shown; no fake .ai file created')
+      } else if (/취소/.test(status)) {
+        results.illustrator = `cancelled: ${status}`
+        log(`RESULT illustrator=CANCELLED ${status}`)
+      } else if (/시간 초과|timed out|timeout/i.test(status)) {
+        results.illustrator = `timed-out: ${status}`
+        log(`RESULT illustrator=TIMED_OUT ${status}`)
+      } else if (status !== initialStatus) {
+        results.illustrator = `failed: ${status}`
+        log(`RESULT illustrator=FAILED ${status}`)
+      } else {
+        results.illustrator = `timed-out: no Illustrator result reached the renderer within ${(ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS) / 1000} seconds`
+        log(`RESULT illustrator=TIMED_OUT no renderer result within ${(ILLUSTRATOR_AUTOMATION_TIMEOUT_MS + ILLUSTRATOR_RENDERER_GRACE_MS) / 1000} seconds`)
+      }
     }
+    const newAutomationTempDirs = fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('northstar-ai-export-') && !automationTempDirsBefore.has(name))
+    assert.deepEqual(newAutomationTempDirs, [], 'Illustrator automation temporary directory was left behind')
     await chooseExport('Illustrator용 SVG')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('SVG를 내보냈습니다')", 'SVG fallback')
     const svg = fs.readFileSync(output.svg, 'utf8')
@@ -97,17 +132,74 @@ async function main() {
     assert.match(svg, /data:image\/jpeg;base64,/); assert.match(svg, /preserveAspectRatio="xMidYMid slice"/)
     await chooseExport('PDF 문서')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('PDF를 내보냈습니다')", 'PDF fallback')
-    assert.match(fs.readFileSync(output.pdf, 'latin1'), /^%PDF-1\.4/)
+    const pdf = fs.readFileSync(output.pdf)
+    const pdfText = pdf.toString('latin1')
+    assert.match(pdfText, /^%PDF-1\.4/)
+    assert.match(pdfText, /\/MediaBox \[0 0 1440 960\]/, 'PDF page bounds do not match the 1440x960 canvas')
+    assert.match(pdfText, /startxref\n\d+\n%%EOF\n?$/, 'PDF cross-reference/trailer is incomplete')
+    const imageObject = /\/Subtype \/Image \/Width (\d+) \/Height (\d+) \/ColorSpace \/DeviceRGB \/BitsPerComponent 8 \/Filter \/FlateDecode \/Length (\d+) >>\nstream\n/.exec(pdfText)
+    assert.ok(imageObject, 'PDF fallback does not contain its expected flattened RGB canvas image')
+    assert.equal(Number(imageObject[1]), 1440); assert.equal(Number(imageObject[2]), 960)
+    const imageStart = imageObject.index + imageObject[0].length
+    const pixels = inflateSync(pdf.subarray(imageStart, imageStart + Number(imageObject[3])))
+    assert.equal(pixels.length, 1440 * 960 * 3, 'PDF image pixel data was truncated')
+    const pixelAt = (x, y) => Array.from(pixels.subarray((y * 1440 + x) * 3, (y * 1440 + x) * 3 + 3))
+    assert.deepEqual(pixelAt(10, 10), [0xe8, 0xdf, 0xcd], 'PDF background color was not preserved')
+    assert.deepEqual(pixelAt(1430, 950), [0xe8, 0xdf, 0xcd], 'PDF canvas edge/background was clipped')
+    assert.notDeepEqual(pixelAt(150, 480), [0xe8, 0xdf, 0xcd], 'PDF image crop does not cover the left side of the photo bounds')
+    assert.notDeepEqual(pixelAt(1290, 480), [0xe8, 0xdf, 0xcd], 'PDF image crop does not cover the right side of the photo bounds')
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(input)).digest('hex'), sourceHash, 'Source document changed during export')
     const leftovers = fs.readdirSync(root).filter((name) => name.endsWith('.tmp.ai'))
     assert.deepEqual(leftovers, [], 'Temporary Illustrator output was left behind')
     assert.deepEqual(errors, [], `Renderer errors: ${errors.join(' | ')}`)
-    log('PASS 1440x960 photo SVG/PDF fallbacks; embedded JPEG and crop preserved; source unchanged; no temporary AI files remain')
+    results.fixture = 'passed: SVG/PDF alternatives, embedded JPEG crop, source SHA-256 unchanged, no temporary AI files'
+    log(`RESULT fixture=PASS synthetic 1440x960 photo; source sha256=${sourceHash}; SVG/PDF fallbacks passed; no .tmp.ai files`)
+
+    if (originalSvgPath) {
+      const svgBytes = fs.readFileSync(originalSvgPath)
+      const svgInput = svgBytes.toString('utf8')
+      const originalSvgHash = crypto.createHash('sha256').update(svgBytes).digest('hex')
+      assert.match(svgInput, /<svg\b/i, 'Original SVG input is not an SVG document')
+      const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svgInput, 'utf8').toString('base64')}`
+      const rendered = await evaluate(`(async () => { const image = new Image(); image.src = ${JSON.stringify(dataUrl)}; await image.decode(); const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; const context = canvas.getContext('2d'); context.drawImage(image, 0, 0); return { width: canvas.width, height: canvas.height, png: canvas.toDataURL('image/png').split(',')[1] } })()`)
+      assert.ok(rendered?.width > 0 && rendered?.height > 0 && rendered?.png, 'Original SVG did not render to a PNG')
+      if (originalRenderPath) {
+        fs.mkdirSync(path.dirname(path.resolve(originalRenderPath)), { recursive: true })
+        fs.writeFileSync(originalRenderPath, Buffer.from(rendered.png, 'base64'))
+      }
+      assert.equal(crypto.createHash('sha256').update(fs.readFileSync(originalSvgPath)).digest('hex'), originalSvgHash, 'Original SVG changed during rendering')
+      results.originalSvg = `passed: separately rendered ${path.basename(originalSvgPath)} at ${rendered.width}x${rendered.height}; sha256=${originalSvgHash}; source unchanged${originalRenderPath ? `; PNG=${originalRenderPath}` : ''}`
+      log(`RESULT original_svg=PASS source=${path.basename(originalSvgPath)} render=${rendered.width}x${rendered.height}${originalRenderPath ? ` png=${originalRenderPath}` : ''}`)
+    } else {
+      results.originalSvg = 'skipped: no NORTHSTAR_M8_SOURCE_SVG was provided'
+      log('RESULT original_svg=SKIPPED no NORTHSTAR_M8_SOURCE_SVG was provided; synthetic fixture result is separate')
+    }
+    writeResults()
+    if (/^(failed|cancelled|timed-out):/.test(results.illustrator)) throw new Error(`Illustrator automation ${results.illustrator}`)
   } finally {
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close()
     if (child.exitCode === null) { child.kill(); await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 5000))]) }
-    logStream.end()
+    await new Promise((resolve) => logStream.end(resolve))
+    fs.rmSync(root, { recursive: true, force: true })
+    assert.equal(fs.existsSync(root), false, 'M8 temporary test directory was not removed')
+    results.cleanup = 'passed: automation temp directory and per-run temp directory removed'
+    writeResults()
   }
 }
 
-main().catch((error) => { console.error(`[m8-ai-export-gui-smoke] FAILED: ${error.stack || error}`); process.exitCode = 1 })
+main().catch((error) => {
+  results.fixture = results.fixture === 'pending' ? `failed: ${error.message}` : results.fixture
+  if (results.illustrator === 'pending') results.illustrator = `failed: ${error.message}`
+  if (results.originalSvg === 'not-provided' && originalSvgPath) results.originalSvg = `failed: ${error.message}`
+  try {
+    fs.rmSync(root, { recursive: true, force: true })
+    assert.equal(fs.existsSync(root), false, 'M8 temporary test directory was not removed')
+    results.cleanup = 'passed: per-run temp directory removed'
+  } catch (cleanupError) {
+    results.cleanup = `failed: ${cleanupError.message}`
+    console.error(`[m8-ai-export-gui-smoke] Could not remove temporary directory: ${cleanupError.message}`)
+  }
+  try { writeResults() } catch (writeError) { console.error(`[m8-ai-export-gui-smoke] Could not write result report: ${writeError.message}`) }
+  console.error(`[m8-ai-export-gui-smoke] FAILED: ${error.stack || error}`)
+  process.exitCode = 1
+})

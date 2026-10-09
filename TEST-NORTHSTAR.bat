@@ -17,7 +17,7 @@ set "CHECKS=0"
 pushd "%ROOT%" >nul 2>&1
 if errorlevel 1 (
   echo [오류] 프로젝트 폴더를 열 수 없습니다: "%ROOT%"
-  pause
+  if not defined CI pause
   exit /b 1
 )
 
@@ -25,7 +25,7 @@ if not exist "%LOG%" (type nul > "%LOG%")
 if errorlevel 1 (
   echo [오류] 로그 파일을 만들 수 없습니다: "%LOG%"
   popd
-  pause
+  if not defined CI pause
   exit /b 1
 )
 >>"%LOG%" echo Northstar Windows validation started %DATE% %TIME%
@@ -78,6 +78,7 @@ call :run_check "M2 AI GUI smoke" smoke:ai-gui
 call :run_check "M3 GUI smoke" smoke:m3-gui
 call :run_check "M5 format GUI smoke" smoke:m5-gui
 call :run_check "M6 export GUI smoke" smoke:m6-gui
+call :run_check "M8 AI export GUI smoke" smoke:m8-gui
 
 popd
 popd
@@ -88,7 +89,7 @@ echo Full output and results: "%LOG%"
 >>"%LOG%" echo Summary: %CHECKS% checks, %FAILURES% failed.
 if "%FAILURES%"=="0" goto :validation_passed
 echo Some checks failed. Review the log above for details.
-pause
+if not defined CI pause
 exit /b 1
 :validation_passed
 echo All validation checks passed.
@@ -154,5 +155,5 @@ goto :prerequisite_error
 :prerequisite_error
 echo 작업 폴더와 npm 출력의 오류를 확인한 뒤 다시 실행하세요.
 popd >nul 2>&1
-pause
+if not defined CI pause
 exit /b 1

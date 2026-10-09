@@ -38,12 +38,54 @@ jobs:
         working-directory: apps/editor
         run: npm run build
 
-      - name: Run root Windows validation launcher (typecheck, unit tests, M1/M2/M3 GUI)
+      - name: Locate optional original M8 SVG attachment
+        shell: pwsh
+        run: |
+          $attachmentRoot = Join-Path $env:GITHUB_WORKSPACE 'temp\ProjectHub\attachments'
+          if (Test-Path -LiteralPath $attachmentRoot) {
+            $originalSvg = Get-ChildItem -LiteralPath $attachmentRoot -Filter 'Untitled.svg' -File -Recurse | Select-Object -First 1
+            if ($originalSvg) { "NORTHSTAR_M8_SOURCE_SVG=$($originalSvg.FullName)" | Add-Content -Encoding utf8 $env:GITHUB_ENV }
+          }
+
+      - name: Run root Windows validation launcher (typecheck, unit tests, M1–M3/M5/M6/M8 GUI)
         id: windows_validation
         shell: pwsh
         env:
           NORTHSTAR_TEST_LOG: ${{ runner.temp }}\northstar-test-results.log
+          NORTHSTAR_M8_RESULT_FILE: ${{ runner.temp }}\northstar-m8-ai-export-results.json
+          NORTHSTAR_M8_SOURCE_RENDER: ${{ runner.temp }}\northstar-m8-original-svg-render.png
         run: .\TEST-NORTHSTAR.bat
+
+      - name: Record M8 AI export evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $resultPath = Join-Path $env:RUNNER_TEMP 'northstar-m8-ai-export-results.json'
+          if (Test-Path -LiteralPath $resultPath) {
+            $evidence = Get-Content -Encoding UTF8 -LiteralPath $resultPath | ConvertFrom-Json
+            @"
+          ## M8 AI export GUI validation
+
+          - Synthetic photo fixture: **$($evidence.fixture)**
+          - Illustrator save/reopen: **$($evidence.illustrator)**
+          - Attached original SVG rendering: **$($evidence.originalSvg)**
+          - Temporary file cleanup: **$($evidence.cleanup)**
+          "@ | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            '## M8 AI export GUI validation' | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            'No M8 result report was produced; see the Windows validation log.' | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload M8 AI export evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-m8-ai-export-evidence
+          path: |
+            ${{ runner.temp }}\northstar-m8-ai-export-results.json
+            ${{ runner.temp }}\northstar-m8-original-svg-render.png
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Run isolated M7 launch and recovery E2E
         shell: pwsh
@@ -110,7 +152,7 @@ jobs:
           - Extracted size: **$expandedMiB MiB** ($env:EXPANDED_BYTES bytes)
           - Signing: **unsigned internal validation build** (no Northstar code-signing certificate configured)
           - Packaged app GUI and M3 `.nbdoc` save/reopen: **$env:PACKAGED_GUI_RESULT**
-          - Root Windows typecheck, unit tests, and M1/M2/M3 GUI launcher: **$env:WINDOWS_VALIDATION_RESULT**
+          - Root Windows typecheck, unit tests, and M1/M2/M3/M5/M6/M8 GUI launcher: **$env:WINDOWS_VALIDATION_RESULT**
           "@ | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
       - name: Upload root Windows validation log
