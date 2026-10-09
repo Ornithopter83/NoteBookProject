@@ -19,6 +19,7 @@ set "PACKAGED_STATUS=%TEMP%\northstar-launch-%RANDOM%-%RANDOM%.status"
 if exist "%PACKAGED_STATUS%" del "%PACKAGED_STATUS%" >nul 2>&1
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%EDITOR%\scripts\m7-launch-check.ps1" -LaunchPackaged -StatusFile "%PACKAGED_STATUS%"
 set "PACKAGED_RC=%ERRORLEVEL%"
+if "%PACKAGED_RC%"=="0" goto :packaged_success
 findstr /x /c:"launched" "%PACKAGED_STATUS%" >nul 2>&1
 if not errorlevel 1 goto :packaged_process_result
 findstr /x /c:"fallback" "%PACKAGED_STATUS%" >nul 2>&1

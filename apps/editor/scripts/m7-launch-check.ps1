@@ -1,8 +1,10 @@
-param(
+﻿param(
   [switch]$LaunchPackaged,
   [string]$ValidateExecutable,
   [string]$ValidatePackageDirectory,
-  [string]$StatusFile
+  [string]$StatusFile,
+  [string]$ProjectRoot,
+  [switch]$TestFailAfterBackup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,14 +79,15 @@ function Get-NorthstarPackageProblems {
 function Set-LaunchStatus {
   param([Parameter(Mandatory = $true)][string]$Status)
   if ($StatusFile) {
-    [System.IO.File]::WriteAllText($StatusFile, $Status, [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($StatusFile, ($Status + [Environment]::NewLine), [System.Text.Encoding]::ASCII)
   }
 }
 
 function Expand-NorthstarZipSafely {
   param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
-    [Parameter(Mandatory = $true)][string]$Destination
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [switch]$FailAfterBackup
   )
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -134,6 +137,9 @@ function Expand-NorthstarZipSafely {
       Move-Item -LiteralPath $Destination -Destination $backup
       $destinationMoved = $true
     }
+    if ($FailAfterBackup -and $destinationMoved) {
+      throw 'E2E에서 요청한 ZIP 교체 직후 복구 시뮬레이션입니다.'
+    }
     Move-Item -LiteralPath $stage -Destination $Destination
     if ($destinationMoved) { Remove-Item -LiteralPath $backup -Recurse -Force }
   }
@@ -173,7 +179,10 @@ if (-not $LaunchPackaged) {
   exit 1
 }
 
-$projectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+if (-not $ProjectRoot) {
+  $ProjectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+}
+$projectRoot = $ProjectRoot
 $release = Join-Path $projectRoot 'apps\editor\release'
 $unpacked = Join-Path $release 'win-unpacked'
 $exe = Join-Path $unpacked 'Northstar Editor.exe'
@@ -193,7 +202,7 @@ try {
     }
 
     Write-Host "[안내] 기존 ZIP 패키지를 안전하게 확인하고 추출합니다: `"$($zip.FullName)`""
-    Expand-NorthstarZipSafely -ArchivePath $zip.FullName -Destination $unpacked
+    Expand-NorthstarZipSafely -ArchivePath $zip.FullName -Destination $unpacked -FailAfterBackup:$TestFailAfterBackup
     $exe = Join-Path $unpacked 'Northstar Editor.exe'
   }
 

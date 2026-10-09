@@ -23,6 +23,8 @@
 
 각 검사의 성공/실패 요약은 창에 표시합니다. 전체 명령 출력과 결과는 `%TEMP%\northstar-test-*.log`에 기록됩니다. CI에서는 `NORTHSTAR_TEST_LOG` 환경 변수로 로그 파일 위치를 지정할 수 있습니다. 실패한 검사는 나머지 검사도 계속 실행하며, 최종 종료 코드는 실패가 있으면 1입니다.
 
+최종 실행 경로 검사는 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps\editor\scripts\m7-launch-e2e.ps1`로 실행합니다. 검사는 `%TEMP%`의 새 임시 폴더 안에 프로젝트 fixture를 만들고 실제 `RUN-NORTHSTAR.bat` 및 패키지 검사 스크립트를 복사해 사용합니다. 공백 경로의 GUI 기동, 정상 종료와 종료 코드 전달, 잘못된 바로가기 대상, exe 누락 후 ZIP 복구, 불완전·손상 ZIP, 복구 중 rollback, 패키지 실패 후 개발 실행 전환을 확인한 뒤 fixture를 삭제합니다. 실제 `release` 패키지와 문서는 변경하지 않습니다.
+
 ## CI
 
-`.github/workflows/m4-packaging-validation.yml`은 Windows Runner에서 이 검증 배치를 실행하고, ZIP 패키지 검사 및 패키지 GUI 스모크와 함께 결과 로그를 업로드합니다. 패키지의 서명 및 배포 범위는 [M4 패키지 검증](m4-validation.md)을 참고하세요.
+`.github/workflows/m4-packaging-validation.yml`은 Windows Runner에서 기존 검증 배치와 M7 격리 실행 E2E를 실행하고, ZIP 패키지 검사 및 패키지 GUI 스모크와 함께 결과 로그를 업로드합니다. 패키지의 서명 및 배포 범위는 [M4 패키지 검증](m4-validation.md)을 참고하세요.
