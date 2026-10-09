@@ -113,9 +113,8 @@ async function verifyPointerEndPath(hit, type) {
       return true
     })()`)
     assert.equal(result, true, `Could not trigger ${type} on the captured canvas node`)
-    if (type === 'lostpointercapture') await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === 'lostpointercapture')`, 'lostpointercapture event delivery after confirmed capture release')
     await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.clientX, y: hit.clientY, button: 'left', clickCount: 1 })
-    if (type === 'pointercancel') await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === 'pointercancel')`, 'pointercancel event delivery')
+    await waitFor(`(() => { const trace = window.__canvasPointerTrace.slice(${before}); return trace.some((event) => event.type === ${JSON.stringify(type)}) && trace.some((event) => event.type === 'pointerup') })()`, `${type} completion after mouse release`)
     await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')", `canvas after ${type}`)
     log(`Canvas remained mounted after ${type}: ${JSON.stringify(await canvasFailureState())}`)
   } catch (error) {
