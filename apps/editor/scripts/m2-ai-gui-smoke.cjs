@@ -90,6 +90,37 @@ async function dragCanvas(hit, description) {
     throw error
   }
 }
+async function verifyPointerEndPath(hit, type) {
+  assert.ok(type === 'pointercancel' || type === 'lostpointercapture', `Unsupported pointer end path: ${type}`)
+  const before = await evaluate('window.__canvasPointerTrace.length')
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.clientX, y: hit.clientY, button: 'none' })
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.clientX, y: hit.clientY, button: 'left', clickCount: 1 })
+  try {
+    await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === 'pointerdown')`, `${type} path pointerdown`)
+    const result = await evaluate(`(() => {
+      const svg = document.querySelector('[data-testid="ai-artboard"]')
+      const node = svg?.querySelector('.selection-outline')?.parentElement
+      const down = window.__canvasPointerTrace.slice(${before}).find((event) => event.type === 'pointerdown')
+      if (!node || !down) return false
+      if (${JSON.stringify(type)} === 'lostpointercapture') {
+        if (!node.hasPointerCapture(down.pointerId)) return false
+        node.releasePointerCapture(down.pointerId)
+      } else {
+        node.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, cancelable: true, pointerId: down.pointerId, pointerType: down.pointerType || 'mouse' }))
+      }
+      return true
+    })()`)
+    assert.equal(result, true, `Could not trigger ${type} on the captured canvas node`)
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.clientX, y: hit.clientY, button: 'left', clickCount: 1 })
+    await waitFor(`window.__canvasPointerTrace.slice(${before}).some((event) => event.type === ${JSON.stringify(type)})`, `${type} event delivery`)
+    await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')", `canvas after ${type}`)
+    log(`Canvas remained mounted after ${type}: ${JSON.stringify(await canvasFailureState())}`)
+  } catch (error) {
+    log(`${type} diagnostic: ${JSON.stringify(await canvasFailureState())}`)
+    try { await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.clientX, y: hit.clientY, button: 'left', clickCount: 1 }) } catch {}
+    throw error
+  }
+}
 
 async function canvasPathHit() {
   return evaluate(`(() => {
@@ -205,7 +236,7 @@ async function main() {
     const pathHit = await canvasPathHit()
     assert.ok(!pathHit.error, `Could not find an actual painted canvas hit point: ${JSON.stringify(pathHit)}`)
     log(`Canvas path hit point: ${JSON.stringify(pathHit)}`)
-    await evaluate(`(() => { const svg = document.querySelector('[data-testid="ai-artboard"]'); window.__canvasPointerTrace = []; for (const type of ['pointerdown', 'pointerup', 'click']) svg.addEventListener(type, (event) => window.__canvasPointerTrace.push({ type, pointerType: event.pointerType ?? null, button: event.button, clientX: event.clientX, clientY: event.clientY, target: event.target?.tagName, nodeId: event.target?.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null, defaultPrevented: event.defaultPrevented }), true) })()`)
+    await evaluate(`(() => { const svg = document.querySelector('[data-testid="ai-artboard"]'); window.__canvasPointerTrace = []; for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'lostpointercapture', 'click']) svg.addEventListener(type, (event) => window.__canvasPointerTrace.push({ type, pointerId: event.pointerId ?? null, pointerType: event.pointerType ?? null, button: event.button, clientX: event.clientX, clientY: event.clientY, target: event.target?.tagName, nodeId: event.target?.closest?.('[data-node]')?.getAttribute('data-node-id') ?? null, defaultPrevented: event.defaultPrevented }), true) })()`)
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pathHit.clientX, y: pathHit.clientY, button: 'none' })
     await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: pathHit.clientX, y: pathHit.clientY, button: 'left', clickCount: 1 })
     try { await waitFor("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown')", 'canvas PointerEvent delivery') }
@@ -220,6 +251,8 @@ async function main() {
     assert.ok(await evaluate("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.matches('[data-node-id]')"), 'Canvas click did not select an SVG node')
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `CDP click did not deliver PointerEvent to the selected canvas path: ${JSON.stringify(await canvasFailureState())}`)
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerup')"), `CDP click did not complete its PointerEvent sequence: ${JSON.stringify(await canvasFailureState())}`)
+    await verifyPointerEndPath(pathHit, 'pointercancel')
+    await verifyPointerEndPath(pathHit, 'lostpointercapture')
     const pathBeforeDrag = await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')")
     await dragCanvas(pathHit, 'Vector path')
     const pathAfterDrag = await evaluate("document.querySelector('[data-testid=ai-artboard] path')?.getAttribute('d')")

@@ -139,8 +139,11 @@ export default function App() {
     }) }))
   }
   const onNodeUp = () => {
-    if (!dragRef.current) return
-    setHistory((items) => [...items.slice(-49), dragRef.current!.before]); setFuture([]); dragRef.current = null; setMessage('저장되지 않은 변경 사항')
+    const drag = dragRef.current
+    if (!drag) return
+    const before = drag.before
+    dragRef.current = null
+    setHistory((items) => [...items.slice(-49), before]); setFuture([]); setMessage('저장되지 않은 변경 사항')
   }
 
   const importImage = async () => { const src = await window.northstar.importImage(); if (src) addNode('image', undefined, undefined, src) }
@@ -175,8 +178,8 @@ export default function App() {
         {aiImport ? <div className="ai-warning" role="status" data-testid="ai-import-warning"><strong>AI 가져오기 · 원본은 변경되지 않습니다</strong><span>{aiImport.sourceName}에서 PDF 호환 벡터와 ASCII 텍스트를 .nbdoc 문서로 변환했습니다. {aiImport.limitations} Illustrator 전용 글꼴 정보와 메타데이터는 보존되지 않으며 네이티브 AI 저장은 지원하지 않습니다.</span></div> : null}
         {psd?.warnings.length ? <details className="psd-warning-list"><summary>PSD 저장 전 확인할 {psd.warnings.length}개 항목</summary><ul>{psd.warnings.map((warning, index) => <li key={`${warning.layerId ?? 'document'}-${index}`}>{warning.message}</li>)}</ul></details> : null}
         <div className="canvas-workspace"><div className="ruler ruler-top"><span>0</span><span>240</span><span>480</span><span>720</span><span>960</span><span>1200</span><span>1440</span></div><div className="ruler ruler-left"><span>0</span><span>160</span><span>320</span><span>480</span><span>640</span><span>800</span><span>960</span></div>
-          <div className="canvas-frame" style={{ width: `${Math.round((psd?.width ?? document.width) * zoom / 100)}px`, height: `${Math.round((psd?.height ?? document.height) * zoom / 100)}px` }}>{psd ? <div className="psd-artboard" data-testid="psd-artboard">{renderPsdLayers(psd.layers, psd.width, psd.height, psdEdits, selectedPsdId, setSelectedPsdId)}</div> : <svg ref={svgRef} data-testid={aiImport ? 'ai-artboard' : 'editor-artboard'} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current && !(event.target as SVGElement).closest('[data-node]')) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} className="artboard" style={{ background: document.background }}>
-            {document.nodes.map((node) => node.visible && <g key={node.id} data-node="true" data-node-id={node.id} opacity={node.opacity / 100} transform={`rotate(${node.rotation} ${node.x + node.width / 2} ${node.y + node.height / 2})`} onPointerDown={(event) => onNodeDown(event, node)} onPointerMove={onNodeMove} onPointerUp={onNodeUp}>
+          <div className="canvas-frame" style={{ width: `${Math.round((psd?.width ?? document.width) * zoom / 100)}px`, height: `${Math.round((psd?.height ?? document.height) * zoom / 100)}px` }}>{psd ? <div className="psd-artboard" data-testid="psd-artboard">{renderPsdLayers(psd.layers, psd.width, psd.height, psdEdits, selectedPsdId, setSelectedPsdId)}</div> : <svg ref={svgRef} data-testid={aiImport ? 'ai-artboard' : 'editor-artboard'} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current && !(event.target as SVGElement).closest('[data-node]')) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} onLostPointerCapture={onNodeUp} className="artboard" style={{ background: document.background }}>
+            {document.nodes.map((node) => node.visible && <g key={node.id} data-node="true" data-node-id={node.id} opacity={node.opacity / 100} transform={`rotate(${node.rotation} ${node.x + node.width / 2} ${node.y + node.height / 2})`} onPointerDown={(event) => onNodeDown(event, node)} onPointerMove={onNodeMove} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} onLostPointerCapture={onNodeUp}>
               {node.kind === 'rect' && <rect x={node.x} y={node.y} width={node.width} height={node.height} rx="7" fill={node.fill} />}
               {node.kind === 'ellipse' && <ellipse cx={node.x + node.width / 2} cy={node.y + node.height / 2} rx={node.width / 2} ry={node.height / 2} fill={node.fill} />}
               {node.kind === 'text' && <text x={node.x} y={node.y + (node.fontSize ?? 40)} fontSize={node.fontSize ?? 40} fontWeight="600" fill={node.fill}>{node.text}</text>}
