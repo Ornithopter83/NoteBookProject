@@ -147,6 +147,8 @@ async function main() {
     await cdp('Runtime.enable')
     await cdp('Page.enable')
     await waitFor("document.querySelector('[data-testid=editor-artboard]')", 'current source editor UI')
+    const opened = await evaluate(`(() => { const button = Array.from(document.querySelectorAll('button')).find((item) => item.innerText.includes('열기')); if (!button || button.disabled) return false; button.click(); return true })()`)
+    assert.equal(opened, true, 'Could not click the editor Open button for the smoke document')
     await waitFor("document.querySelector('.document-tab')?.innerText.includes('M9 현재 소스 확인')", 'smoke document loaded by current source')
     await evaluate(`(() => { const button = Array.from(document.querySelectorAll('button')).find((item) => item.innerText.includes('내보내기')); if (!button) throw new Error('Export menu button is missing'); button.click(); return true })()`)
     await waitFor("Array.from(document.querySelectorAll('[role=menuitem]')).some((item) => item.innerText.includes('Illustrator AI'))", 'Illustrator AI export menu item')
