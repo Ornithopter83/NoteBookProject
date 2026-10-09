@@ -182,6 +182,10 @@ async function main() {
       await waitFor(`document.querySelector('.app-shell') && document.querySelector('.brand')?.innerText.includes('northstar')`, 'React app shell')
       const text = await evaluate(`document.querySelector('.app-shell').innerText`)
       assert.match(text, /레이어/)
+      const fileCapability = await evaluate(`document.querySelector('[data-testid="file-capability"]')?.innerText`)
+      assert.match(fileCapability, /\.nbdoc/)
+      assert.match(fileCapability, /편집 가능/)
+      assert.match(fileCapability, /저장/)
       log('React app shell and editor panels are mounted')
     })
 

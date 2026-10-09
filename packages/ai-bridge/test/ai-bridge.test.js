@@ -52,8 +52,44 @@ test('recognizes compatible AI marker only after structural PDF validation', () 
   assert.equal(inspectAi(valid).status, 'pdf-compatible-ai');
   assert.equal(inspectAi(valid).adobeCompatibility, 'unverified');
   assert.deepEqual(analyzeAi(valid).pages[0].items.map(item => item.type), ['path', 'text']);
+  assert.deepEqual(analyzeAi(valid).originalBytes, new Uint8Array(valid));
   assert.equal(inspectAi(writePdf(base)).status, 'pdf-without-ai-marker');
   assert.ok(['invalid', 'unsupported'].includes(inspectAi(Buffer.from('not a pdf')).status));
+});
+
+test('uses a standard inherited MediaBox from the page tree', () => {
+  const pdf = buildPdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [3 0 R] /MediaBox [0 0 420 297] >>',
+    '<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>',
+    '<< /Length 0 >>\nstream\n\nendstream'
+  ]);
+  assert.equal(inspectAi(pdf).status, 'pdf-compatible-ai');
+  assert.deepEqual(analyzeAi(pdf).pages[0], { width: 420, height: 297, items: [] });
+
+  const withoutInheritedBox = buildPdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
+    '<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>',
+    '<< /Length 0 >>\nstream\n\nendstream'
+  ]);
+  assert.equal(inspectAi(withoutInheritedBox).status, 'unsupported');
+});
+
+test('normalizes the standard v and y curve operators to equivalent cubic segments', () => {
+  const content = '10 10 m 20 20 30 30 v 40 40 50 50 y S';
+  const pdf = buildPdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R >>',
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`
+  ]);
+  const path = analyzeAi(pdf).pages[0].items[0];
+  assert.deepEqual(path.segments, [
+    { op: 'M', points: [[10, 10]] },
+    { op: 'C', points: [[10, 10], [20, 20], [30, 30]] },
+    { op: 'C', points: [[40, 40], [50, 50], [50, 50]] }
+  ]);
 });
 
 test('reports bounded PDF support and rejects ambiguous or unsafe structures', () => {

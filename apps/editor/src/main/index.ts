@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { validateDocument } from '../shared/document'
@@ -14,7 +14,11 @@ const rendererHtml = path.resolve(here, '../renderer/index.html')
 const preloadPath = path.resolve(here, '../preload/index.cjs')
 let activeDocumentPath: string | undefined
 let activeAiSourcePath: string | undefined
+let activePsdSourcePath: string | undefined
 const psdSessions = new Map<string, ReturnType<typeof openPsd>>()
+const MAX_AI_BYTES = 64 * 1024 * 1024
+const MAX_PSD_BYTES = 512 * 1024 * 1024
+const MAX_NBDOC_BYTES = 64 * 1024 * 1024
 
 function flattenPsdTree(tree: PsdLayerView[]): PsdLayerView[] {
   return tree.map((layer) => ({
@@ -37,6 +41,30 @@ function isDescendantPath(parentPath: string, candidatePath: string): boolean {
   const relativePath = path.relative(parentPath, candidatePath)
   return relativePath !== '' && relativePath !== '..' &&
     !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)
+}
+
+async function canonicalDestination(filePath: string): Promise<string> {
+  const absolutePath = path.resolve(filePath)
+  try { return await realpath(absolutePath) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return path.join(await realpath(path.dirname(absolutePath)), path.basename(absolutePath))
+  }
+}
+
+async function isSameFileOrPath(sourcePath: string, destinationPath: string): Promise<boolean> {
+  const destination = await canonicalDestination(destinationPath)
+  const source = await realpath(sourcePath)
+  const samePath = process.platform === 'win32'
+    ? destination.toLocaleLowerCase('en-US') === source.toLocaleLowerCase('en-US')
+    : destination === source
+  if (samePath) return true
+  try {
+    const [sourceInfo, destinationInfo] = await Promise.all([stat(source), stat(destination)])
+    return sourceInfo.dev === destinationInfo.dev && sourceInfo.ino === destinationInfo.ino
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
 }
 
 function createWindow(): void {
@@ -67,17 +95,8 @@ ipcMain.handle('document:save', async (_event, payload: { document: unknown }) =
   if (result.canceled || !result.filePath) return null
   const savePath = path.resolve(result.filePath)
   if (path.extname(savePath).toLowerCase() !== '.nbdoc') throw new Error('변환 문서는 .nbdoc 파일로만 저장할 수 있습니다.')
-  if (activeAiSourcePath) {
-    let destinationPath: string
-    try {
-      destinationPath = await realpath(savePath)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      destinationPath = path.join(await realpath(path.dirname(savePath)), path.basename(savePath))
-    }
-    if (destinationPath.toLowerCase() === activeAiSourcePath.toLowerCase()) {
-      throw new Error('원본 AI 파일은 덮어쓸 수 없습니다. .nbdoc 경로를 선택해 주세요.')
-    }
+  if (activeAiSourcePath && await isSameFileOrPath(activeAiSourcePath, savePath)) {
+    throw new Error('원본 AI 파일은 덮어쓸 수 없습니다. .nbdoc 경로를 선택해 주세요.')
   }
   const document = validateDocument(structuredClone(payload.document))
   const assetDir = path.join(path.dirname(savePath), `${path.basename(savePath, '.nbdoc')}.assets`)
@@ -108,7 +127,7 @@ ipcMain.handle('document:open', async () => {
   }
   if (path.extname(filePath).toLowerCase() === '.ai') {
     const sourcePath = await realpath(filePath)
-    const bytes = await readFileWithinLimit(sourcePath, 64 * 1024 * 1024, 'AI')
+    const bytes = await readFileWithinLimit(sourcePath, MAX_AI_BYTES, 'AI')
     const report = inspectAi(bytes)
     if (!report.compatible || report.status !== 'pdf-compatible-ai') throw new Error(report.reason ?? 'PDF 호환 Illustrator AI 파일이 아닙니다.')
     if (report.pages !== 1) throw new Error('한 페이지 PDF 호환 AI 파일만 가져올 수 있습니다.')
@@ -130,18 +149,21 @@ ipcMain.handle('document:open', async () => {
     const document = validateDocument({ format: 'northstar-document', version: 1, name: path.basename(filePath, '.ai'), width: page.width, height: page.height, background: '#ffffff', nodes })
     activeDocumentPath = undefined
     activeAiSourcePath = sourcePath
+    activePsdSourcePath = undefined
     return { filePath, document, aiImport: { pdfVersion: source.pdfVersion, sourceName: path.basename(filePath), limitations: 'Illustrator 전용 데이터는 읽거나 보존하지 않습니다. 변환 문서는 .nbdoc로만 저장됩니다.' } }
   }
   if (path.extname(filePath).toLowerCase() === '.psd') {
-    const psd = openPsd(await readFileWithinLimit(filePath, 512 * 1024 * 1024, 'PSD'))
+    const sourcePath = await realpath(filePath)
+    const psd = openPsd(await readFileWithinLimit(sourcePath, MAX_PSD_BYTES, 'PSD'))
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     psdSessions.clear()
     psdSessions.set(sessionId, psd)
-    activeDocumentPath = filePath
+    activeDocumentPath = undefined
     activeAiSourcePath = undefined
-    return { filePath, psd: { sessionId, name: path.basename(filePath, '.psd'), width: psd.width, height: psd.height, bitDepth: psd.bitDepth, layers: flattenPsdTree(psd.readTree()), warnings: psd.warnings } }
+    activePsdSourcePath = sourcePath
+    return { filePath: sourcePath, psd: { sessionId, name: path.basename(filePath, '.psd'), width: psd.width, height: psd.height, bitDepth: psd.bitDepth, layers: flattenPsdTree(psd.readTree()), warnings: psd.warnings } }
   }
-  const document = validateDocument(JSON.parse(await readFile(filePath, 'utf8')))
+  const document = validateDocument(JSON.parse((await readFileWithinLimit(filePath, MAX_NBDOC_BYTES, '.nbdoc')).toString('utf8')))
   const assetRoot = path.resolve(path.dirname(filePath), `${path.basename(filePath, '.nbdoc')}.assets`)
   for (const node of document.nodes) {
     if (node.kind !== 'image' || !node.resourcePath) continue
@@ -159,22 +181,36 @@ ipcMain.handle('document:open', async () => {
   }
   activeDocumentPath = filePath
   activeAiSourcePath = undefined
+  activePsdSourcePath = undefined
   return { filePath, document }
 })
 
 ipcMain.handle('psd:save', async (_event, payload: { sessionId: string; edits: Array<{ id: string; changes: LayerChanges }> }) => {
   const session = psdSessions.get(payload.sessionId)
   if (!session) throw new Error('PSD 편집 세션이 만료되었습니다. 파일을 다시 열어 주세요.')
+  const tree = session.readTree()
+  const unsupported = session.warnings.filter((warning) => warning.code === 'special-layer')
+  if (unsupported.length) {
+    const details = unsupported.slice(0, 3).map((warning) => warning.message).join(' ')
+    throw new Error(`지원되지 않는 PSD 레이어 구조가 있어 저장을 거부했습니다. 텍스트·조정·스마트 오브젝트·벡터 레이어를 래스터화한 사본을 사용해 주세요. ${details}`)
+  }
   let filePath = activeDocumentPath
   if (process.env.NORTHSTAR_GUI_SMOKE === '1') filePath = process.env.NORTHSTAR_GUI_SMOKE_PSD_FILE ?? filePath
   if (!filePath) {
-    const result = await dialog.showSaveDialog({ title: 'PSD 저장', defaultPath: 'Untitled.psd', filters: [{ name: 'Photoshop 문서', extensions: ['psd'] }] })
+    const source = activePsdSourcePath
+    const defaultPath = source ? path.join(path.dirname(source), `${path.basename(source, path.extname(source))}-edited.psd`) : 'Untitled.psd'
+    const result = await dialog.showSaveDialog({ title: 'PSD 사본 저장', defaultPath, filters: [{ name: 'Photoshop 문서', extensions: ['psd'] }] })
     if (result.canceled || !result.filePath) return null
     filePath = result.filePath.toLowerCase().endsWith('.psd') ? result.filePath : `${result.filePath}.psd`
   }
+  if (!filePath) return null
+  if (path.extname(filePath).toLowerCase() !== '.psd') throw new Error('편집된 PSD 사본은 .psd 파일로 저장해 주세요.')
+  if (activePsdSourcePath && await isSameFileOrPath(activePsdSourcePath, filePath)) {
+    throw new Error('열어 둔 PSD 원본은 덮어쓸 수 없습니다. 다른 .psd 경로에 사본으로 저장해 주세요.')
+  }
   const beforeIds = new Set<string>()
   const collect = (layers: PsdLayerView[]) => layers.forEach((layer) => { beforeIds.add(layer.id); if (layer.children) collect(layer.children) })
-  collect(session.readTree())
+  collect(tree)
   for (const edit of payload.edits) {
     if (!beforeIds.has(edit.id)) throw new Error('레이어 구조가 변경되어 저장할 수 없습니다. PSD를 다시 열어 주세요.')
     session.editLayer(edit.id, edit.changes)

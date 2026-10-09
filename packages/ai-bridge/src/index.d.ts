@@ -27,6 +27,8 @@ export interface AiPage {
 export interface AiDocument {
   format: 'pdf-compatible-ai-subset'
   pdfVersion: string
+  /** Exact input bytes retained for archival/export. Edits do not update this source copy. */
+  originalBytes: Uint8Array
   pages: AiPage[]
 }
 

@@ -10,6 +10,7 @@ const { writePsdBuffer } = require('ag-psd')
 const appRoot = path.resolve(__dirname, '..')
 const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'northstar-psd-gui-'))
 const psdPath = path.join(smokeRoot, 'gui-smoke.psd')
+const savedPsdPath = path.join(smokeRoot, 'gui-smoke-edited.psd')
 const logPath = path.join(smokeRoot, 'electron.log')
 const fixture = writePsdBuffer({ width: 8, height: 8, children: [{ name: '스모크 그룹', children: [{ name: '원본 래스터', left: 1, top: 2, opacity: 0.8, imageData: { width: 2, height: 2, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]) } }] }] })
 fs.writeFileSync(psdPath, fixture)
@@ -67,7 +68,7 @@ async function main() {
   const logStream = fs.createWriteStream(logPath, { encoding: 'utf8' })
   child = spawn(electron, [`--remote-debugging-port=${port}`, '--disable-gpu', '--no-sandbox', appRoot], {
     cwd: appRoot, windowsHide: true,
-    env: { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: psdPath, NORTHSTAR_GUI_SMOKE_PSD_FILE: psdPath }
+    env: { ...process.env, NORTHSTAR_GUI_SMOKE: '1', NORTHSTAR_GUI_SMOKE_FILE: psdPath, NORTHSTAR_GUI_SMOKE_PSD_FILE: savedPsdPath }
   })
   child.stdout.pipe(logStream); child.stderr.pipe(logStream)
   child.on('error', (error) => { childError = error })
@@ -97,7 +98,8 @@ async function main() {
     await waitFor("Array.from(document.querySelectorAll('.layer-name')).some((e) => e.innerText === '스모크 편집 레이어')", 'edited PSD properties')
     await click("document.querySelector('button.primary')", 'save PSD')
     await waitFor("document.querySelector('.canvas-status')?.innerText.includes('PSD를 저장했습니다')", 'PSD save completion')
-    const savedBytes = fs.readFileSync(psdPath)
+    assert.deepEqual(fs.readFileSync(psdPath), fixture, 'Saving the edited PSD changed the opened source file')
+    const savedBytes = fs.readFileSync(savedPsdPath)
     const saved = openPsd(savedBytes)
     const savedTree = saved.readTree()
     assert.equal(savedTree[0].name, '스모크 그룹')

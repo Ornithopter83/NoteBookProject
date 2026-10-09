@@ -1,0 +1,96 @@
+name: M5 PSD and AI compatibility validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-compatibility-validation:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/editor/package-lock.json
+
+      - name: Install and build PSD bridge
+        working-directory: packages/psd-bridge
+        run: |
+          npm ci
+          npm run build
+
+      - name: Validate AI bridge
+        working-directory: packages/ai-bridge
+        run: npm run check
+
+      - name: Install editor dependencies
+        working-directory: apps/editor
+        run: npm ci
+
+      - name: Build editor
+        working-directory: apps/editor
+        run: npm run build
+
+      - name: Keep M1 to M4 regression and editor checks
+        working-directory: apps/editor
+        run: |
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:psd-gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:ai-gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:m3-gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run M5 PSD source protection and AI conversion GUI smoke
+        working-directory: apps/editor
+        run: node scripts/m5-format-gui-smoke.cjs
+
+      - name: Build unsigned Windows ZIP package
+        working-directory: apps/editor
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: 'false'
+        run: npm run package:win
+
+      - name: Extract package and verify executable and app archive
+        id: extract
+        shell: pwsh
+        working-directory: apps/editor
+        run: |
+          $archive = Get-ChildItem release -Filter 'Northstar-Editor-*-win-x64.zip' | Select-Object -First 1
+          if (-not $archive) { throw 'Windows ZIP package was not generated.' }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'northstar-m5-extracted'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractRoot -Force
+          $appExe = Get-ChildItem -LiteralPath $extractRoot -Filter 'Northstar Editor.exe' -File -Recurse | Select-Object -First 1
+          $appAsar = Get-ChildItem -LiteralPath $extractRoot -Filter 'app.asar' -File -Recurse | Select-Object -First 1
+          if (-not $appExe -or -not $appAsar) { throw 'Packaged executable or app.asar is missing.' }
+          "PACKAGED_EXE=$($appExe.FullName)" >> $env:GITHUB_OUTPUT
+          "PACKAGE_PATH=$($archive.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Run packaged M3 GUI save and reopen smoke
+        working-directory: apps/editor
+        env:
+          NORTHSTAR_PACKAGED_EXE: ${{ steps.extract.outputs.PACKAGED_EXE }}
+        run: npm run smoke:packaged-gui
+
+      - name: Upload Windows ZIP package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-editor-windows-x64-m5-validation
+          path: ${{ steps.extract.outputs.PACKAGE_PATH }}
+          if-no-files-found: error
+          retention-days: 14

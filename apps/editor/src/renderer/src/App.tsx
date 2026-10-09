@@ -37,6 +37,7 @@ export default function App() {
   }
   const selectedPsd = psd ? findPsdLayer(psd.layers, selectedPsdId) : null
   const effectivePsdLayer = selectedPsd ? { ...selectedPsd, ...psdEdits[selectedPsd.id] } : null
+  const psdSaveBlocked = hasPsdSaveBlocker(psd)
 
   const commit = useCallback((next: EditorDocument) => {
     setHistory((items) => [...items.slice(-49), cloneDocument(document)])
@@ -83,6 +84,10 @@ export default function App() {
   }
 
   const save = async () => {
+    if (psdSaveBlocked) {
+      setMessage('지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.')
+      return
+    }
     try {
       if (psd) {
         const edits = Object.entries(psdEdits).map(([id, changes]) => ({ id, changes }))
@@ -288,9 +293,9 @@ export default function App() {
     <header className="topbar">
       <div className="brand"><div className="brand-mark">N</div><span>northstar</span><span className="brand-divider" /><span className="workspace-label">워크스페이스</span></div>
       <div className="document-tab"><span className="doc-dot" />{document.name}<span className="tab-close"><X size={13} /></span></div>
-      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()}><Save size={15} /> 저장</button><button className="avatar">J</button></div>
+      <div className="top-actions"><button className="icon-button" title="실행 취소" onClick={undo} disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" title="다시 실행" onClick={redo} disabled={!future.length}><Redo2 size={17} /></button><span className="top-divider" /><button className="button subtle" onClick={() => void open()}><FilePlus2 size={15} /> 열기</button><button className="button primary" onClick={() => void save()} disabled={psdSaveBlocked} title={psdSaveBlocked ? '지원되지 않는 PSD 데이터가 있어 저장할 수 없습니다.' : undefined}><Save size={15} /> 저장</button><button className="avatar">J</button></div>
     </header>
-    <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{psd?.name ?? document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status"><span className="saved-dot" />{message}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : 'RGB · 8비트'}</div></div>
+    <div className="subbar"><div className="crumb"><span>내 파일</span><span className="crumb-sep">/</span><strong>{psd?.name ?? document.name}</strong><ChevronDown size={13} /></div><div className="canvas-status" role="status" aria-live="polite"><span className="saved-dot" />{message}<span className="status-divider" />{psd ? `PSD · ${psd.bitDepth}비트` : aiImport ? `AI 가져오기 · PDF ${aiImport.pdfVersion}` : 'NBDOC · RGB · 8비트'}</div></div>
     <div className="workspace">
       <aside className="tool-rail">
         <div className="tool-group"><ToolButton active={tool === 'select'} label="선택" onClick={() => setTool('select')}><MousePointer2 /></ToolButton>{!psd && <><ToolButton active={tool === 'rect'} label="사각형" onClick={() => setTool('rect')}><Square /></ToolButton><ToolButton active={tool === 'ellipse'} label="타원" onClick={() => setTool('ellipse')}><Circle /></ToolButton><ToolButton active={tool === 'text'} label="텍스트" onClick={() => setTool('text')}><Type /></ToolButton><ToolButton active={false} label="이미지 가져오기" onClick={() => void importImage()}><ImagePlus /></ToolButton></>}</div>
@@ -298,7 +303,10 @@ export default function App() {
       </aside>
       <main className="stage-area">
         <div className="canvas-toolbar"><div className="canvas-tools"><button className={tool === 'select' ? 'mini-tool active' : 'mini-tool'} title="선택 도구" onClick={() => setTool('select')}><MousePointer2 size={15} /></button>{!psd && <><span className="mini-separator" /><button className="mini-tool" title="레이어 추가" onClick={() => addNode('rect')}><Square size={14} /></button><button className="mini-tool" title="텍스트 추가" onClick={() => addNode('text')}><Type size={15} /></button><button className="mini-tool" title="이미지 가져오기" onClick={() => void importImage()}><FileImage size={15} /></button></>}</div><div className="canvas-tools"><span className="canvas-dimensions">{psd?.width ?? document.width} × {psd?.height ?? document.height}</span><span className="mini-separator" /><button className="zoom-button" onClick={() => setZoom(Math.max(40, zoom - 10))}>−</button><span className="zoom-value">{zoom}%</span><button className="zoom-button" onClick={() => setZoom(Math.min(120, zoom + 10))}>+</button></div></div>
-        {aiImport ? <div className="ai-warning" role="status" data-testid="ai-import-warning"><strong>AI 가져오기 · 원본은 변경되지 않습니다</strong><span>{aiImport.sourceName}에서 PDF 호환 벡터와 ASCII 텍스트를 .nbdoc 문서로 변환했습니다. {aiImport.limitations} Illustrator 전용 글꼴 정보와 메타데이터는 보존되지 않으며 네이티브 AI 저장은 지원하지 않습니다.</span></div> : null}
+        <div className={`file-capability ${psd ? 'file-capability-psd' : aiImport ? 'file-capability-ai' : 'file-capability-native'}`} data-testid="file-capability" aria-label="파일 형식 및 편집 범위">
+          {psd ? <><strong>PSD · 가져온 원본</strong><span>편집: 레이어 속성 · 픽셀 내용 편집 불가</span><span>저장: {psd.bitDepth !== 8 ? `${psd.bitDepth}비트 파일은 저장 불가` : psdSaveBlocked ? '현재 파일 차단 · 미지원 데이터' : '별도 PSD 사본 · 8비트 RGB만'}</span></> : aiImport ? <><strong>AI · PDF 호환 내용 가져오기</strong><span>편집: 변환된 벡터·ASCII 텍스트</span><span>저장: .nbdoc만 · AI 원본 저장 불가</span></> : <><strong>.nbdoc · Northstar 문서</strong><span>편집 가능 · .nbdoc로 저장</span></>}
+        </div>
+        {aiImport ? <div className="ai-warning" role="status" data-testid="ai-import-warning"><strong>변환 안내 · AI 원본은 변경되지 않았습니다</strong><span>{aiImport.sourceName}: PDF 호환 내용만 가져왔습니다. {aiImport.limitations}</span></div> : null}
         {psd?.warnings.length ? <details className="psd-warning-list"><summary>PSD 저장 전 확인할 {psd.warnings.length}개 항목</summary><ul>{psd.warnings.map((warning, index) => <li key={`${warning.layerId ?? 'document'}-${index}`}>{warning.message}</li>)}</ul></details> : null}
         <div className="canvas-workspace"><div className="ruler ruler-top"><span>0</span><span>240</span><span>480</span><span>720</span><span>960</span><span>1200</span><span>1440</span></div><div className="ruler ruler-left"><span>0</span><span>160</span><span>320</span><span>480</span><span>640</span><span>800</span><span>960</span></div>
           <div className="canvas-frame" style={{ width: `${Math.round((psd?.width ?? document.width) * zoom / 100)}px`, height: `${Math.round((psd?.height ?? document.height) * zoom / 100)}px` }}>{psd ? <div className="psd-artboard" data-testid="psd-artboard">{renderPsdLayers(psd.layers, psd.width, psd.height, psdEdits, selectedPsdId, setSelectedPsdId)}</div> : <svg ref={svgRef} data-testid={aiImport ? 'ai-artboard' : 'editor-artboard'} viewBox={`0 0 ${document.width} ${document.height}`} onPointerDown={onCanvasDown} onPointerMove={(event) => { if (dragRef.current && !(event.target as SVGElement).closest('[data-node]')) onNodeMove(event) }} onPointerUp={onNodeUp} onPointerCancel={onNodeUp} onLostPointerCapture={onNodeUp} className="artboard" style={{ background: document.background }}>
@@ -387,6 +395,10 @@ function findPsdLayer(layers: PsdLayerView[], id: string | null): PsdLayerView |
     if (nested) return nested
   }
   return null
+}
+
+function hasPsdSaveBlocker(psd: PsdEditorDocument | null): boolean {
+  return Boolean(psd?.warnings.some((warning) => /saving.*blocked/i.test(warning.message)))
 }
 
 function patchPsdTree(layers: PsdLayerView[], id: string, changes: LayerChanges): PsdLayerView[] {

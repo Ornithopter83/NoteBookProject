@@ -66,6 +66,52 @@ test('returns copied raster buffers so callers cannot mutate the PSD by accident
   assert.equal(document.getLayerPixels('0.0')?.data[0], 255);
 });
 
+test('reads and repeatedly saves ordinary RGB layer position, visibility, opacity, nesting, and RGBA alpha', () => {
+  const bytes = writePsdBuffer({
+    width: 2,
+    height: 2,
+    children: [{
+      name: '숨김 그룹',
+      hidden: true,
+      opacity: 0.6,
+      children: [{
+        name: '알파 픽셀',
+        left: -4,
+        top: 7,
+        opacity: 0.25,
+        imageData: { data: new Uint8ClampedArray(originalPixels), width: 2, height: 2 },
+      }],
+    }],
+  });
+  let document = openPsd(bytes);
+  for (let i = 0; i < 2; i++) {
+    const group = document.readTree()[0];
+    const layer = group?.children?.[0];
+    assert.equal(group?.visible, false);
+    assert.ok(Math.abs((group?.opacity ?? 0) - 0.6) <= 1 / 255);
+    assert.equal(layer?.left, -4);
+    assert.equal(layer?.top, 7);
+    assert.ok(Math.abs((layer?.opacity ?? 0) - 0.25) <= 1 / 255);
+    assert.deepEqual(document.getLayerPixels('0.0')?.data, originalPixels);
+    document = openPsd(document.save());
+  }
+});
+
+test('warns and blocks rewriting layers with effects whose Photoshop fidelity is not guaranteed', () => {
+  const bytes = writePsdBuffer({
+    width: 2,
+    height: 2,
+    children: [{
+      name: '그림자 레이어',
+      effects: { dropShadow: [{ enabled: true }] },
+      imageData: { data: new Uint8ClampedArray(originalPixels), width: 2, height: 2 },
+    }],
+  } as Psd);
+  const document = openPsd(bytes);
+  assert.ok(document.warnings.some((warning) => warning.message.includes('saving is blocked')));
+  assert.throws(() => document.save(), (error: unknown) => error instanceof PsdBridgeError && error.code === 'UNSUPPORTED_FORMAT');
+});
+
 test('warns about and blocks saving high bit depth input to prevent precision loss', () => {
   const bytes = new Uint8Array(26 + 12 + 2 + 6);
   const view = new DataView(bytes.buffer);
@@ -82,7 +128,7 @@ test('warns about and blocks saving high bit depth input to prevent precision lo
   view.setUint16(38, 0, false); // raw composite compression
   const document = openPsd(bytes);
   assert.equal(document.bitDepth, 16);
-  assert.ok(document.warnings.some((warning) => warning.message.includes('writer supports 8-bit output only')));
+  assert.ok(document.warnings.some((warning) => warning.message.includes('Saving is blocked: 16-bit pixel data cannot be written without precision loss.')));
   assert.throws(() => document.save(), (error: unknown) => error instanceof PsdBridgeError && error.code === 'UNSUPPORTED_FORMAT');
 });
 

@@ -42,7 +42,7 @@ export function analyzeAi(input) {
   const bytes = toBytes(input);
   const parsed = parsePdf(bytes);
   if (!hasAiMarker(parsed)) fail('NOT_AI', 'No PDF-compatible Illustrator marker was found.');
-  return { format: 'pdf-compatible-ai-subset', pdfVersion: parsed.version, pages: parsed.pages };
+  return { format: 'pdf-compatible-ai-subset', pdfVersion: parsed.version, originalBytes: Uint8Array.from(bytes), pages: parsed.pages };
 }
 
 /** Parse the same safe subset for ordinary PDFs, without requiring an Illustrator marker. */
@@ -234,7 +234,7 @@ function readObjects(source) {
   return objects;
 }
 
-function visitPages(id, objects, pages, seen, budget, depth = 0) {
+function visitPages(id, objects, pages, seen, budget, depth = 0, inheritedMediaBox = null) {
   if (depth > MAX_PAGE_TREE_DEPTH) fail('UNSUPPORTED_PDF', 'Page tree nesting exceeds the supported depth limit.');
   if (seen.has(id)) fail('INVALID_PDF', 'Cycle or duplicate reference detected in page tree.');
   seen.add(id);
@@ -247,14 +247,20 @@ function visitPages(id, objects, pages, seen, budget, depth = 0) {
   if (/\/(?:CropBox|BleedBox|TrimBox|ArtBox|Rotate|UserUnit|Group|Annots|OC)\b/.test(body)) {
     fail('UNSUPPORTED_PDF', 'Alternate page boxes, page rotation, page scaling, annotations, and page compositing features are unsupported.');
   }
-  if (/\/Type\s*\/Page\b/.test(body)) {
-    if (!hasExactlyOneKey(body, 'Type') || !hasExactlyOneKey(body, 'MediaBox') || !hasExactlyOneKey(body, 'Contents')) fail('UNSUPPORTED_PDF', 'Page dictionaries must contain one Type, MediaBox, and Contents entry.');
+  let mediaBox = inheritedMediaBox;
+  if (/\/MediaBox\b/.test(body)) {
+    if (!hasExactlyOneKey(body, 'MediaBox')) fail('UNSUPPORTED_PDF', 'Page dictionaries must not contain duplicate MediaBox entries.');
     const box = body.match(/\/MediaBox\s*\[([^\]]*)\]/);
     const values = box?.[1].trim().split(/\s+/) ?? [];
-    if (values.length !== 4 || values.some(value => !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value))) fail('UNSUPPORTED_PDF', 'Pages must have a direct four-number MediaBox.');
-    const [x0,y0,x1,y1] = values.map(Number);
-    if (![x0,y0,x1,y1].every(validCoordinate) || x1 <= x0 || y1 <= y0) fail('UNSUPPORTED_PDF', 'Page MediaBox coordinates exceed the supported finite range.');
-    if (x0 !== 0 || y0 !== 0) fail('UNSUPPORTED_PDF', 'Pages must use a zero-origin MediaBox.');
+    if (values.length !== 4 || values.some(value => !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value))) fail('UNSUPPORTED_PDF', 'MediaBox must be a direct four-number array.');
+    mediaBox = values.map(Number);
+    if (!mediaBox.every(validCoordinate) || mediaBox[2] <= mediaBox[0] || mediaBox[3] <= mediaBox[1]) fail('UNSUPPORTED_PDF', 'MediaBox coordinates exceed the supported finite range.');
+    if (mediaBox[0] !== 0 || mediaBox[1] !== 0) fail('UNSUPPORTED_PDF', 'Pages must use a zero-origin MediaBox.');
+  }
+  if (/\/Type\s*\/Page\b/.test(body)) {
+    if (!hasExactlyOneKey(body, 'Type') || !hasExactlyOneKey(body, 'Contents')) fail('UNSUPPORTED_PDF', 'Page dictionaries must contain one Type and Contents entry.');
+    if (!mediaBox) fail('UNSUPPORTED_PDF', 'Page has no direct or inherited MediaBox.');
+    const [x0,y0,x1,y1] = mediaBox;
     if (/\/Contents\s*\[/.test(body)) fail('UNSUPPORTED_PDF', 'Each page must have exactly one direct content stream.');
     const contents = body.match(/\/Contents\s+(\d+)\s+0\s+R\b/);
     if (!contents) fail('UNSUPPORTED_PDF', 'Each page must have one direct content stream.');
@@ -288,7 +294,7 @@ function visitPages(id, objects, pages, seen, budget, depth = 0) {
   const pageCountBefore = pages.length;
   const refs = [...kidsContent.matchAll(/(\d+)\s+0\s+R/g)];
   if (!refs.length) fail('INVALID_PDF', 'Empty page-tree Kids array.');
-  for (const ref of refs) visitPages(Number(ref[1]), objects, pages, seen, budget, depth + 1);
+  for (const ref of refs) visitPages(Number(ref[1]), objects, pages, seen, budget, depth + 1, mediaBox);
   if (Number(countMatch[1]) !== pages.length - pageCountBefore) fail('INVALID_PDF', 'Page tree child count does not match its page descendants.');
 }
 
@@ -336,11 +342,11 @@ function parseContent(content, budget) {
   for(const token of tokens) {
     if(token.type!=='word') { operands.push(token); if(operands.length>MAX_OPERANDS) fail('UNSUPPORTED_PDF','Too many operands.'); continue; }
     const op=token.value, nums=()=>operands.map(number);
-    if(op==='m'||op==='l') { const v=nums(); if(v.length!==2) fail('UNSUPPORTED_PDF',`Malformed ${op} operator.`); if(op==='m'){current ??= {segments:[]};current.segments.push({op:'M',points:[[v[0],v[1]]]});}else{if(!current)fail('INVALID_PDF','Line without current path.');current.segments.push({op:'L',points:[[v[0],v[1]]]});} addSegments(1); }
-    else if(op==='c') {const v=nums();if(v.length!==6||!current)fail('UNSUPPORTED_PDF','Malformed cubic curve.');current.segments.push({op:'C',points:[[v[0],v[1]],[v[2],v[3]],[v[4],v[5]]]});addSegments(1);}
-    else if(op==='h') {if(operands.length||!current)fail('INVALID_PDF','Malformed close-path operator.');current.segments.push({op:'Z',points:[]});addSegments(1);}
+    if(op==='m'||op==='l') { const v=nums(); if(v.length!==2) fail('UNSUPPORTED_PDF',`Malformed ${op} operator.`); if(op==='m'){current ??= {segments:[],currentPoint:null,subpathStart:null};current.segments.push({op:'M',points:[[v[0],v[1]]]});current.currentPoint=[v[0],v[1]];current.subpathStart=[v[0],v[1]];}else{if(!current?.currentPoint)fail('INVALID_PDF','Line without current point.');current.segments.push({op:'L',points:[[v[0],v[1]]]});current.currentPoint=[v[0],v[1]];} addSegments(1); }
+    else if(op==='c'||op==='v'||op==='y') {const v=nums();if(!current?.currentPoint||(op==='c'&&v.length!==6)||(op!=='c'&&v.length!==4))fail('UNSUPPORTED_PDF',`Malformed ${op} curve.`);const start=current.currentPoint;const points=op==='c'?[[v[0],v[1]],[v[2],v[3]],[v[4],v[5]]]:op==='v'?[start,[v[0],v[1]],[v[2],v[3]]]:[[v[0],v[1]],[v[2],v[3]],[v[2],v[3]]];current.segments.push({op:'C',points});current.currentPoint=[...points[2]];addSegments(1);}
+    else if(op==='h') {if(operands.length||!current?.currentPoint||!current.subpathStart)fail('INVALID_PDF','Malformed close-path operator.');current.segments.push({op:'Z',points:[]});current.currentPoint=[...current.subpathStart];addSegments(1);}
     else if(['S','s','f','F','f*','B','B*','b','b*','n'].includes(op)) {if(operands.length)fail('UNSUPPORTED_PDF',`Unexpected operands for ${op}.`);if(op==='n')flush();else flush(op);}
-    else if(op==='re') {const v=nums();if(v.length!==4)fail('UNSUPPORTED_PDF','Malformed rectangle.');current ??= {segments:[]};current.segments.push({op:'M',points:[[v[0],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]+v[3]]]}, {op:'L',points:[[v[0],v[1]+v[3]]]}, {op:'Z',points:[]});addSegments(5);}
+    else if(op==='re') {const v=nums();if(v.length!==4)fail('UNSUPPORTED_PDF','Malformed rectangle.');current ??= {segments:[],currentPoint:null,subpathStart:null};current.segments.push({op:'M',points:[[v[0],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]]]}, {op:'L',points:[[v[0]+v[2],v[1]+v[3]]]}, {op:'L',points:[[v[0],v[1]+v[3]]]}, {op:'Z',points:[]});current.currentPoint=[v[0],v[1]];current.subpathStart=[v[0],v[1]];addSegments(5);}
     else if(op==='BT') {if(operands.length||textMode)fail('INVALID_PDF','Malformed text block.');flush();textMode=true;textPos=[0,0];textShownSincePositioning=false;}
     else if(op==='ET') {if(operands.length||!textMode)fail('INVALID_PDF','Malformed text block.');textMode=false;}
     else if(op==='Tf') {if(operands.length!==2||operands[0].type!=='name'||operands[0].value!=='F1')fail('UNSUPPORTED_PDF','Only the validated F1 font resource is supported.');fontSize=number(operands[1]);if(fontSize<=0||fontSize>10000)fail('INVALID_PDF','Invalid font size.');}

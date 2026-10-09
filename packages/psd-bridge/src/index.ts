@@ -185,14 +185,14 @@ function scanWarnings(layers: Layer[] | undefined, parentId = ''): PsdBridgeWarn
       warnings.push({
         code: 'special-layer',
         layerId: id,
-        message: `Layer “${layer.name ?? ''}” is a ${kind} layer. Its source data is passed through, but this bridge does not render or edit its content; verify its appearance in the target application.`,
+        message: `Layer “${layer.name ?? ''}” is a ${kind} layer. This bridge does not guarantee Photoshop fidelity for it, so saving this document is blocked.`,
       });
     }
     if (layer.mask || layer.realMask || layer.effects || layer.blendingRanges) {
       warnings.push({
         code: 'document-feature',
         layerId: id,
-        message: `Layer “${layer.name ?? ''}” has masks, effects, or blending ranges. These properties are retained where ag-psd supports them, but rendered appearance may differ; check the saved PSD.`,
+        message: `Layer “${layer.name ?? ''}” has masks, effects, or blending ranges; saving is blocked because their fidelity is not guaranteed.`,
       });
     }
     warnings.push(...scanWarnings(layer.children, id));
@@ -234,14 +234,21 @@ export class PsdBridgeDocument {
   readonly height: number;
   readonly bitDepth: number;
   readonly warnings: readonly PsdBridgeWarning[];
-  private constructor(private readonly psd: Psd, private readonly limits: PsdBridgeLimits, private readonly sourceByteLength: number) {
+  private readonly saveBlockers: readonly string[];
+  private constructor(private readonly psd: Psd, private readonly limits: PsdBridgeLimits, private readonly sourceByteLength: number, missingFeatures: readonly string[]) {
     this.width = psd.width;
     this.height = psd.height;
     this.bitDepth = psd.bitsPerChannel ?? 8;
+    this.saveBlockers = Object.freeze([
+      ...(this.bitDepth !== 8 ? [`${this.bitDepth}-bit pixel data cannot be written without precision loss.`] : []),
+      ...(psd.colorMode !== 3 ? [`Color mode ${psd.colorMode ?? 'unknown'} is not RGB and cannot be safely rewritten.`] : []),
+      ...missingFeatures.map((feature) => `The PSD contains an unsupported feature (${feature}); rewriting could discard it.`),
+      ...scanUnsafeLayers(psd.children),
+    ]);
     this.warnings = Object.freeze([
       ...scanWarnings(psd.children),
+      ...this.saveBlockers.map((message) => ({ code: 'unrecognized-feature' as const, message: `Saving is blocked: ${message}` })),
       { code: 'document-feature' as const, message: 'Layer edits do not regenerate the flattened composite preview. The target editor may rebuild it when opening the saved PSD; check the saved appearance.' },
-      ...(this.bitDepth === 8 ? [] : [{ code: 'document-feature' as const, message: `This document uses ${this.bitDepth}-bit pixels. ag-psd can read them, but its writer supports 8-bit output only; saving is blocked to prevent precision loss.` }]),
     ]);
   }
 
@@ -250,17 +257,22 @@ export class PsdBridgeDocument {
     preflight(input, limits);
     ensureNodeImageDataFactory();
     let psd: Psd;
+    const missingFeatures: string[] = [];
     try {
       psd = readPsd(input, {
         useImageData: true,
         skipThumbnail: true,
         totalMemoryLimit: limits.maxDecodedBytes,
+        logMissingFeatures: true,
+        log: (...args: unknown[]) => missingFeatures.push(args.map(String).join(' ')),
       });
     } catch (error) {
       throw new PsdBridgeError(`Could not decode PSD: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_PSD');
     }
     countLayers(psd.children, 0, limits, { count: 0 });
-    return new PsdBridgeDocument(psd, limits, input.byteLength);
+    // ag-psd skips unknown additional-info records. Keep the document readable, but never
+    // let a subsequent write silently discard data that was not represented in its model.
+    return new PsdBridgeDocument(psd, limits, input.byteLength, missingFeatures);
   }
 
   readTree(): PsdLayerView[] {
@@ -309,8 +321,8 @@ export class PsdBridgeDocument {
   }
 
   save(): Buffer {
-    if (this.bitDepth !== 8) {
-      throw new PsdBridgeError(`Saving ${this.bitDepth}-bit PSDs is unsupported because ag-psd only writes 8-bit documents.`, 'UNSUPPORTED_FORMAT');
+    if (this.saveBlockers.length) {
+      throw new PsdBridgeError(`Saving is blocked to avoid losing unsupported PSD data: ${this.saveBlockers.join(' ')}`, 'UNSUPPORTED_FORMAT');
     }
     if (estimateOutputBytes(this.psd.children, this.width, this.height, this.sourceByteLength) > this.limits.maxFileBytes) {
       throw new PsdBridgeError('Estimated PSD output exceeds the configured file size limit; encoding was stopped before allocating the output buffer.', 'OUTPUT_LIMIT');
@@ -324,6 +336,22 @@ export class PsdBridgeDocument {
     if (output.byteLength > this.limits.maxFileBytes) throw new PsdBridgeError('Saved PSD exceeds the configured file size limit.', 'OUTPUT_LIMIT');
     return output;
   }
+}
+
+function scanUnsafeLayers(layers: Layer[] | undefined, parentId = ''): string[] {
+  const blockers: string[] = [];
+  (layers ?? []).forEach((layer, index) => {
+    const id = parentId ? `${parentId}.${index}` : String(index);
+    const kind = layerKind(layer);
+    if (kind === 'text' || kind === 'adjustment' || kind === 'smart-object' || kind === 'vector') {
+      blockers.push(`Layer ${id} (“${layer.name ?? ''}”) contains ${kind} data whose Photoshop fidelity is not guaranteed.`);
+    }
+    if (layer.mask || layer.realMask || layer.effects || layer.blendingRanges) {
+      blockers.push(`Layer ${id} (“${layer.name ?? ''}”) contains masks, effects, or blending ranges that cannot be guaranteed to survive rewriting.`);
+    }
+    blockers.push(...scanUnsafeLayers(layer.children, id));
+  });
+  return blockers;
 }
 
 export function openPsd(input: Uint8Array, options?: OpenPsdOptions): PsdBridgeDocument {
