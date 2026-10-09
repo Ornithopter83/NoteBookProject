@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "smoke:gui": "node scripts/m1-gui-smoke.cjs",
     "smoke:psd-gui": "node scripts/m2-psd-gui-smoke.cjs",
-    "smoke:ai-gui": "node scripts/m2-ai-gui-smoke.cjs"
+    "smoke:ai-gui": "node scripts/m2-ai-gui-smoke.cjs",
+    "smoke:m3-gui": "node scripts/m3-editor-gui-smoke.cjs"
   },
   "dependencies": {
     "@northstar/ai-bridge": "file:../../packages/ai-bridge",
