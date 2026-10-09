@@ -272,9 +272,9 @@ async function main() {
     try { await waitFor("document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.querySelector('text')", 'select text on canvas') }
     catch (error) { log(`Canvas text selection diagnostic: ${JSON.stringify(await canvasFailureState())}`); throw error }
     assert.ok(await evaluate("window.__canvasPointerTrace.some((event) => event.type === 'pointerdown' && event.nodeId === document.querySelector('[data-testid=ai-artboard] .selection-outline')?.parentElement?.getAttribute('data-node-id'))"), `Canvas click did not deliver PointerEvent to the selected text: ${JSON.stringify(await canvasFailureState())}`)
-    const textBeforeDrag = await evaluate("{ const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } }")
+    const textBeforeDrag = await evaluate("(() => { const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } })()")
     await dragCanvas(textHit, 'AI text')
-    const textAfterDrag = await evaluate("{ const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } }")
+    const textAfterDrag = await evaluate("(() => { const text = document.querySelector('[data-testid=ai-artboard] text'); return { x: text?.getAttribute('x'), y: text?.getAttribute('y') } })()")
     assert.notDeepEqual(textAfterDrag, textBeforeDrag, `Canvas text drag did not change its position: ${JSON.stringify(await canvasFailureState())}`)
     log(`Canvas text drag changed rendered position: ${JSON.stringify({ before: textBeforeDrag, after: textAfterDrag })}`)
     assert.equal(await setValue('.text-area', 'Edited AI text', 'textarea'), true)
