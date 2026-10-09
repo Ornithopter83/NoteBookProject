@@ -95,6 +95,45 @@ jobs:
         working-directory: apps/editor
         run: node scripts/m9-batch-gui-smoke.cjs
 
+      - name: Run M10 no-argument root launcher PNG/JPEG vector workflow E2E
+        id: m10_batch_flow
+        working-directory: apps/editor
+        shell: pwsh
+        env:
+          NORTHSTAR_M10_BATCH_RESULT_FILE: ${{ runner.temp }}\northstar-m10-batch-flow-results.json
+        run: node scripts/m10-batch-user-flow-smoke.cjs
+
+      - name: Record M10 batch user flow evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $resultPath = Join-Path $env:RUNNER_TEMP 'northstar-m10-batch-flow-results.json'
+          if (Test-Path -LiteralPath $resultPath) {
+            $evidence = Get-Content -Encoding UTF8 -LiteralPath $resultPath | ConvertFrom-Json
+            @"
+          ## M10 root launcher vector E2E
+
+          - Launcher: **$($evidence.launcher)**
+          - Document and metadata: **$($evidence.document)**
+          - PNG/JPEG source retention: **$($evidence.images)**
+          - Save and reopen: **$($evidence.persistence)**
+          - SVG real file: **$($evidence.svg)**
+          - Illustrator branch: **$($evidence.illustrator)**
+          "@ | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            '## M10 root launcher vector E2E' | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            'No M10 batch flow result report was produced; see the Windows validation log.' | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload M10 batch user flow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-m10-batch-user-flow-evidence
+          path: ${{ runner.temp }}\northstar-m10-batch-flow-results.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run M10 real export persistence and Illustrator branch E2E
         id: m10_export
         working-directory: apps/editor
